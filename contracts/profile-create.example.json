@@ -1,0 +1,56 @@
+{
+  "name": "每周共享目录分析",
+  "enabled": true,
+  "scope": {
+    "mode": "selected",
+    "source_ids": [
+      "11111111-1111-4111-8111-111111111111"
+    ],
+    "include_future_registered": false,
+    "exclude_globs": [
+      "**/*.part",
+      "**/*.tmp"
+    ]
+  },
+  "sections": [
+    "volume",
+    "folders",
+    "owners",
+    "quota",
+    "categories",
+    "duplicates",
+    "largest",
+    "recently_modified",
+    "least_accessed"
+  ],
+  "owner_ids_to_list": [],
+  "duplicates": {
+    "enabled": true,
+    "match_name": false,
+    "match_mtime": false,
+    "min_size_bytes": "1",
+    "max_size_bytes": null,
+    "max_listed_files": 5000,
+    "hash_budget_bytes": null
+  },
+  "rank_limit": 200,
+  "schedule": {
+    "type": "cron",
+    "expression": "0 2 * * 0",
+    "timezone": "UTC",
+    "misfire_policy": "skip",
+    "overlap_policy": "coalesce_once"
+  },
+  "retention": {
+    "report_keep_count": 30,
+    "detail_keep_count": 3
+  },
+  "notifications": {
+    "recipients": [],
+    "notify_on": [
+      "succeeded",
+      "partial",
+      "failed"
+    ]
+  }
+}

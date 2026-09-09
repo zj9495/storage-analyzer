@@ -1,0 +1,66 @@
+{
+  "job_states": [
+    "QUEUED",
+    "RUNNING",
+    "PAUSING",
+    "PAUSED",
+    "CANCELLING",
+    "CANCELLED",
+    "SUCCEEDED",
+    "PARTIAL",
+    "FAILED",
+    "INTERRUPTED"
+  ],
+  "job_phases": [
+    "PRECHECK",
+    "ENUMERATE",
+    "HASH",
+    "AGGREGATE",
+    "PUBLISH",
+    "NOTIFY"
+  ],
+  "section_quality": [
+    "complete",
+    "partial",
+    "skipped",
+    "unavailable"
+  ],
+  "source_availability": [
+    "online",
+    "offline",
+    "permission_denied",
+    "unknown"
+  ],
+  "source_storage_kind": [
+    "local",
+    "remote",
+    "tiered",
+    "unknown"
+  ],
+  "source_read_policy": [
+    "metadata_only",
+    "content_allowed"
+  ],
+  "category_ids": [
+    "audio",
+    "disk_images",
+    "documents",
+    "executables",
+    "pictures",
+    "videos",
+    "web_and_code",
+    "archives",
+    "other"
+  ],
+  "cleanup_item_states": [
+    "PLANNED",
+    "VALIDATING",
+    "MOVING",
+    "QUARANTINED",
+    "RESTORED",
+    "PURGED",
+    "SKIPPED",
+    "FAILED",
+    "CONFLICT"
+  ]
+}

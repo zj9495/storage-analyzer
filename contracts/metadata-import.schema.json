@@ -1,0 +1,262 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provider_label": {
+      "type": "string",
+      "minLength": 1
+    },
+    "identities": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uid": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "gid": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "namespace",
+          "uid",
+          "gid",
+          "display_name",
+          "observed_at"
+        ]
+      }
+    },
+    "source_links": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "volume_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider_volume_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "source_id",
+          "volume_id",
+          "provider_volume_key"
+        ]
+      }
+    },
+    "quotas": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "principal": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uid": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            },
+            "required": [
+              "namespace",
+              "uid"
+            ]
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "source",
+                  "volume"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ]
+          },
+          "metric": {
+            "enum": [
+              "logical_bytes",
+              "allocated_bytes",
+              "filesystem_quota_bytes"
+            ]
+          },
+          "origin": {
+            "enum": [
+              "system_imported",
+              "advisory"
+            ]
+          },
+          "limit": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "enum": [
+                  "known",
+                  "unlimited",
+                  "unknown"
+                ]
+              },
+              "bytes": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$",
+                    "maxLength": 20
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "state",
+              "bytes"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "state": {
+                      "const": "known"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "bytes": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]*)$",
+                      "maxLength": 20
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "bytes": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "used_bytes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "maxLength": 20
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_label": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "principal",
+          "scope",
+          "metric",
+          "origin",
+          "limit",
+          "used_bytes",
+          "observed_at",
+          "expires_at",
+          "provider_label"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "generated_at",
+    "provider_label",
+    "identities",
+    "source_links",
+    "quotas"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NAS Storage Analyzer metadata import v1"
+}
