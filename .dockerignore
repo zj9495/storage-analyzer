@@ -1,0 +1,17 @@
+target/
+target-linux/
+node_modules/
+web/node_modules/
+web/dist/
+dist/
+.git/
+docs/
+tests/
+*.log
+.DS_Store
+
+# The Rust metadata import validator embeds this contract at compile time.
+!docs/
+!docs/design/
+!docs/design/contracts/
+!docs/design/contracts/metadata-import.schema.json

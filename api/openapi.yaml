@@ -1,0 +1,4124 @@
+openapi: 3.1.0
+info:
+  title: NAS Storage Analyzer API
+  version: 0.1.0
+  description: |
+    NAS Storage Analyzer HTTP API 契约（唯一权威来源 / single source of truth）。
+
+    通用约定（spec 17.1）：
+    - API 前缀 `/api/v1`，JSON UTF-8；`/health/live`、`/health/ready` 不带前缀。
+    - 同源 Cookie 会话；除 setup/login/health 外全部接口需管理员身份。
+    - 所有修改类（非 GET）请求需要 `X-CSRF-Token` 头与 Origin 校验。
+    - 耗时操作返回 202 与 `job_id`，不阻塞 HTTP。
+    - 所有字节数、inode/device 标识、可能超过 2^53 的整数一律以十进制字符串传输。
+    - 文件时间以 RFC3339 UTC 展示字段 + 秒/纳秒原始字段表达；无法表达时为 null 并给原因。
+    - 成功响应统一 `{data, meta, request_id}`；列表 meta 含 next_cursor/page_size/total_known/truncated/detail_available。
+    - 错误响应统一 `{error:{code,message,details}, request_id}`，错误码稳定，前端不得解析中文文本做逻辑判断。
+  contact:
+    name: nas-storage-analyzer
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+servers:
+  - url: /
+    description: 同源部署；/api/v1 前缀已包含在各路径中
+tags:
+  - name: setup
+    description: 初始化状态与首次管理员配置
+  - name: auth
+    description: 管理员登录、会话与重新认证
+  - name: admins
+    description: 管理员账户管理
+  - name: mounts
+    description: 已批准挂载根与目录浏览
+  - name: sources
+    description: 分析数据源登记与身份确认
+  - name: volumes
+    description: 存储卷与容量采样
+  - name: profiles
+    description: 分析任务配置与调度
+  - name: jobs
+    description: 异步任务状态与事件
+  - name: reports
+    description: 报告查询、对比与明细
+  - name: exports
+    description: 报告导出任务与下载
+  - name: cleanup
+    description: 清理计划、隔离与恢复
+  - name: settings
+    description: 分类、通知、存储与保留设置
+  - name: metadata
+    description: 外部元数据导入与预览
+  - name: backup
+    description: 配置备份与恢复
+  - name: diagnostics
+    description: 运行诊断信息与诊断包
+  - name: audit
+    description: 脱敏审计事件
+  - name: health
+    description: 存活与就绪探针
+
+paths:
+  # ---------------------------------------------------------------- setup
+  /api/v1/setup/status:
+    get:
+      tags: [setup]
+      summary: 初始化状态
+      description: 仅返回 initialized 与是否可初始化，不返回 setup token。无需认证。
+      operationId: getSetupStatus
+      security: []
+      responses:
+        '200':
+          description: 初始化状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [initialized, can_initialize]
+                        properties:
+                          initialized: { type: boolean }
+                          can_initialize: { type: boolean, description: 服务端是否仍持有有效 setup token }
+  /api/v1/setup/complete:
+    post:
+      tags: [setup]
+      summary: 完成初始化
+      description: 提交 setup_token、管理员账号与时区；成功即撤销初始化令牌。初始化尚未建立会话时，X-CSRF-Token 必须与 body.setup_token 完全一致；setup_token 是部署时通过 out-of-band 渠道下发的一次性 CSRF proof。
+      operationId: completeSetup
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [setup_token, username, password, timezone]
+              properties:
+                setup_token: { type: string, description: 部署时下发的一次性初始化令牌 }
+                username: { type: string, minLength: 1, maxLength: 64 }
+                password: { type: string, minLength: 12, format: password }
+                timezone: { type: string, description: IANA 时区名，作为部署默认时区 }
+      responses:
+        '201':
+          description: 初始化完成，返回新会话（Set-Cookie）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminUser' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------- auth
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: 登录
+      description: 登录按 IP + 账号双重限速；成功返回会话 Cookie 与 CSRF token。
+      operationId: login
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [admin, csrf_token]
+                        properties:
+                          admin: { $ref: '#/components/schemas/AdminUser' }
+                          csrf_token: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: 登出
+      description: 撤销服务端会话。
+      operationId: logout
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: 已登出
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { type: object, additionalProperties: false }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: 当前管理员
+      description: 返回当前管理员、会话到期时间与功能能力（只读/可写/初始化状态）。
+      operationId: getMe
+      responses:
+        '200':
+          description: 当前会话信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [admin, session_expires_at, capabilities]
+                        properties:
+                          admin: { $ref: '#/components/schemas/AdminUser' }
+                          session_expires_at: { $ref: '#/components/schemas/DateTime' }
+                          capabilities:
+                            type: object
+                            properties:
+                              write_operations_allowed: { type: boolean, description: 部署级 allow_write_operations }
+                              write_operations_enabled: { type: boolean, description: 同 write_operations_allowed（部署级写开关） }
+                              kernel_safe_writes: { type: boolean, description: 内核是否具备 openat2 等安全写能力 }
+                              can_cleanup: { type: boolean, description: 是否具备清理所需全部开关 }
+                              initialized: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/auth/reauth:
+    post:
+      tags: [auth]
+      summary: 重新认证
+      description: 验证密码，返回 5 分钟有效的危险操作 token（reauth_token）。
+      operationId: reauth
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: 重新认证成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [reauth_token, expires_at]
+                        properties:
+                          reauth_token: { type: string }
+                          expires_at: { $ref: '#/components/schemas/DateTime' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- admins
+  /api/v1/admins:
+    get:
+      tags: [admins]
+      summary: 管理员列表
+      operationId: listAdmins
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 管理员分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/AdminUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [admins]
+      summary: 创建管理员
+      operationId: createAdmin
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, minLength: 1, maxLength: 64 }
+                password: { type: string, minLength: 12, format: password }
+      responses:
+        '200':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminUser' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admins/{id}:
+    get:
+      tags: [admins]
+      summary: 管理员详情
+      operationId: getAdmin
+      parameters:
+        - $ref: '#/components/parameters/AdminId'
+      responses:
+        '200':
+          description: 管理员详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [admins]
+      summary: 修改管理员
+      description: 可改密码与 enabled；禁用/删除最后一名可用管理员会被拒绝。
+      operationId: updateAdmin
+      parameters:
+        - $ref: '#/components/parameters/AdminId'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password: { type: string, minLength: 12, format: password }
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminUser' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      tags: [admins]
+      summary: 删除管理员
+      description: 防止删除最后一人（422）。
+      operationId: deleteAdmin
+      parameters:
+        - $ref: '#/components/parameters/AdminId'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { type: object, additionalProperties: false }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  # ---------------------------------------------------------------- mounts
+  /api/v1/mounts:
+    get:
+      tags: [mounts]
+      summary: 批准挂载根列表
+      description: 返回部署配置批准的挂载根与权限能力；不遍历宿主机任意路径。
+      operationId: listMounts
+      responses:
+        '200':
+          description: 挂载根列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/MountRoot' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/mounts/{key}/directories:
+    get:
+      tags: [mounts]
+      summary: 挂载根内子目录浏览
+      description: 仅允许批准根内选择子目录；no-follow、分页。越界返回 PATH_OUTSIDE_ROOT。
+      operationId: listMountDirectories
+      parameters:
+        - $ref: '#/components/parameters/MountKey'
+        - name: path
+          in: query
+          description: 挂载根内的相对路径（默认根）
+          schema: { type: string, default: '' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 子目录分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          required: [name, relative_path]
+                          properties:
+                            name: { type: string }
+                            relative_path: { type: string }
+                            readable: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  # ---------------------------------------------------------------- sources
+  /api/v1/sources:
+    get:
+      tags: [sources]
+      summary: 数据源列表
+      operationId: listSources
+      parameters:
+        - name: include_disabled
+          in: query
+          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 数据源分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Source' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [sources]
+      summary: 注册数据源
+      description: 校验 mount_key + relative_root 位于批准根内；父子重叠源默认拒绝。
+      operationId: createSource
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SourceCreate' }
+      responses:
+        '200':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Source' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/sources/{id}:
+    get:
+      tags: [sources]
+      summary: 数据源详情
+      operationId: getSource
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+      responses:
+        '200':
+          description: 数据源详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Source' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [sources]
+      summary: 修改数据源配置
+      operationId: updateSource
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SourceUpdate' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Source' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      tags: [sources]
+      summary: 停用数据源（软删除）
+      description: 删除为停用/软删除，保留历史报告与索引。
+      operationId: deleteSource
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: 已停用
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Source' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/sources/{id}/probe:
+    post:
+      tags: [sources]
+      summary: 只读探测
+      description: 触发只读诊断，返回可用性状态与能力矩阵（atime、设备身份、读写权限等）。
+      operationId: probeSource
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: 探测结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SourceProbe'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/sources/{id}/confirm-identity:
+    post:
+      tags: [sources]
+      summary: 确认新身份
+      description: 确认源新身份，递增 identity_epoch 并失效相关缓存。
+      operationId: confirmSourceIdentity
+      parameters:
+        - $ref: '#/components/parameters/SourceId'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_identity_epoch]
+              properties:
+                expected_identity_epoch: { type: integer, format: int64, description: 客户端看到的当前 epoch，乐观并发校验 }
+      responses:
+        '200':
+          description: 已确认
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Source' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------- volumes
+  /api/v1/volumes:
+    get:
+      tags: [volumes]
+      summary: 卷列表
+      operationId: listVolumes
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 卷分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Volume' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [volumes]
+      summary: 登记卷
+      description: 登记逻辑卷并确认容量采样源；不管理真实分区。
+      operationId: createVolume
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, capacity_source_id]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                capacity_source_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Volume' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/volumes/{id}:
+    get:
+      tags: [volumes]
+      summary: 卷详情
+      description: 包含容量源选择与历史身份信息。
+      operationId: getVolume
+      parameters:
+        - $ref: '#/components/parameters/VolumeId'
+      responses:
+        '200':
+          description: 卷详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Volume' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [volumes]
+      summary: 修改卷
+      operationId: updateVolume
+      parameters:
+        - $ref: '#/components/parameters/VolumeId'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                capacity_source_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Volume' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/volumes/{id}/samples:
+    get:
+      tags: [volumes]
+      summary: 卷容量历史采样
+      description: from/to 为 RFC3339 半开区间 [from, to)；resolution=raw/day；返回数据质量，空窗返回空洞而非伪造值。
+      operationId: listVolumeSamples
+      parameters:
+        - $ref: '#/components/parameters/VolumeId'
+        - name: from
+          in: query
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - name: to
+          in: query
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - name: resolution
+          in: query
+          schema: { type: string, enum: [raw, day], default: day }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 采样分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/VolumeSample' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- notifications
+  /api/v1/notifications:
+    get:
+      tags: [settings]
+      summary: 内部通知列表
+      description: 返回按创建时间倒序排列的已持久化内部通知；内部通知与 SMTP outbox 分离。
+      operationId: listInternalNotifications
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 内部通知分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/InternalNotification' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------------------------------------------------------- profiles
+  /api/v1/profiles:
+    get:
+      tags: [profiles]
+      summary: 任务列表
+      operationId: listProfiles
+      parameters:
+        - name: include_deleted
+          in: query
+          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 任务分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Profile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [profiles]
+      summary: 创建任务
+      description: 校验所有源存在、分类规则有效、排除语法可编译、通知格式有效；创建为 version=1。
+      operationId: createProfile
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileConfig' }
+            examples:
+              weeklySharedAnalysis:
+                summary: 每周共享目录分析（contracts/profile-create.example.json）
+                value:
+                  name: 每周共享目录分析
+                  enabled: true
+                  scope:
+                    mode: selected
+                    source_ids: ['11111111-1111-4111-8111-111111111111']
+                    include_future_registered: false
+                    exclude_globs: ['**/*.part', '**/*.tmp']
+                  sections: [volume, folders, owners, quota, categories, duplicates, largest, recently_modified, least_accessed]
+                  owner_ids_to_list: []
+                  duplicates:
+                    enabled: true
+                    match_name: false
+                    match_mtime: false
+                    min_size_bytes: '1'
+                    max_size_bytes: null
+                    max_listed_files: 5000
+                    hash_budget_bytes: null
+                  rank_limit: 200
+                  schedule:
+                    type: cron
+                    expression: 0 2 * * 0
+                    timezone: UTC
+                    misfire_policy: skip
+                    overlap_policy: coalesce_once
+                  retention:
+                    report_keep_count: 30
+                    detail_keep_count: 3
+                  notifications:
+                    recipients: []
+                    notify_on: [succeeded, partial, failed]
+      responses:
+        '200':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Profile' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/profiles/schedule-preview:
+    post:
+      tags: [profiles]
+      summary: 调度预览
+      description: 校验 cron 表达式/时区，返回未来五个触发点（UTC + 任务本地时区）。
+      operationId: previewSchedule
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileSchedule'
+      responses:
+        '200':
+          description: 未来五个触发点
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [valid, next_runs]
+                        properties:
+                          valid: { type: boolean }
+                          next_runs:
+                            type: array
+                            maxItems: 5
+                            items: { $ref: '#/components/schemas/DateTime' }
+                          errors:
+                            type: array
+                            items: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/profiles/{id}:
+    get:
+      tags: [profiles]
+      summary: 任务详情
+      description: 返回当前版本配置与版本号（ETag 携带版本用于 If-Match）。
+      operationId: getProfile
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: 任务详情
+          headers:
+            ETag:
+              description: 当前版本，用于 PATCH 的 If-Match
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Profile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [profiles]
+      summary: 修改任务（乐观并发）
+      description: 必须携带 If-Match（当前版本）；修改生成新版本，只作用于下一次运行；运行中实例保存参数副本。
+      operationId: updateProfile
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileConfig' }
+      responses:
+        '200':
+          description: 已更新，返回新版本
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Profile' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      tags: [profiles]
+      summary: 删除任务（软删除）
+      description: 默认软删除并停止未来调度，保留已有报告；purge_history=true 时才清理历史。
+      operationId: deleteProfile
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/CsrfToken'
+        - name: purge_history
+          in: query
+          description: 是否同时清理该任务的历史报告（显式选择，默认否）
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { type: object, additionalProperties: false }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/profiles/{id}/clone:
+    post:
+      tags: [profiles]
+      summary: 克隆任务
+      description: 以新名称和新 UUID 复制配置（新 version=1），不复制运行状态与调度历史。
+      operationId: cloneProfile
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+      responses:
+        '200':
+          description: 已克隆
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Profile' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/profiles/{id}/run:
+    post:
+      tags: [profiles]
+      summary: 手动触发运行
+      description: 需 Idempotency-Key；重复提交返回同一个 job。返回 202 与 job_id、run_id。
+      operationId: runProfile
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: 已入队
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [job_id, run_id]
+                        properties:
+                          job_id: { type: string, format: uuid }
+                          run_id: { type: string, format: uuid }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- jobs
+  /api/v1/jobs:
+    get:
+      tags: [jobs]
+      summary: 任务实例列表
+      operationId: listJobs
+      parameters:
+        - name: type
+          in: query
+          schema: { $ref: '#/components/schemas/JobType' }
+        - name: state
+          in: query
+          schema: { $ref: '#/components/schemas/JobState' }
+        - name: profile_id
+          in: query
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 任务实例分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/jobs/{id}:
+    get:
+      tags: [jobs]
+      summary: 任务实例详情
+      description: 状态、阶段、计数与错误摘要；是任务状态的唯一持久来源（SSE 仅用于显示）。
+      operationId: getJob
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: 任务实例详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/jobs/{id}/control:
+    post:
+      tags: [jobs]
+      summary: 任务控制
+      description: action=pause/resume/cancel/retry；校验当前状态，非法转换返回 JOB_STATE_CONFLICT(409)。
+      operationId: controlJob
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [pause, resume, cancel, retry] }
+      responses:
+        '200':
+          description: 已接受控制指令，返回最新任务状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Job' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/jobs/{id}/events:
+    get:
+      tags: [jobs]
+      summary: 任务事件流（SSE）
+      description: |
+        text/event-stream 响应读取当前已持久化事件并在输出后结束。每个帧使用 SSE 的 id、event、data 字段：id 是单调递增的 sequence，data 是 JSON payload 文本。
+        当前事件类型包括 job.state、job.progress、job.warning、job.completed、heartbeat、scan.progress、scan.cancel_requested、scan.completed、job.finished。
+        断线重连用 Last-Event-ID 从最近事件恢复；已被服务端裁剪的旧事件不会触发 state snapshot。SSE 只负责显示，不作为任务状态的唯一持久来源。
+      operationId: streamJobEvents
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/LastEventId'
+      responses:
+        '200':
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/SseEventFrame' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- reports
+  /api/v1/reports:
+    get:
+      tags: [reports]
+      summary: 报告历史列表
+      operationId: listReports
+      parameters:
+        - name: profile_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string, enum: [succeeded, partial, failed] }
+        - name: from
+          in: query
+          description: 创建时间下界（含）
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - name: to
+          in: query
+          description: 创建时间上界（不含，左闭右开）
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 报告分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/ReportSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/reports/{id}:
+    get:
+      tags: [reports]
+      summary: 报告详情
+      description: 返回 manifest 与摘要；报告不可变，不随设置/映射/重命名变化。
+      operationId: getReport
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+      responses:
+        '200':
+          description: 报告详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ReportDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [reports]
+      summary: 删除报告
+      description: 只清理报告及受控生成物（摘要库/导出副本/静态报告），不接触源文件；被固定的报告拒绝。
+      operationId: deleteReport
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { type: object, additionalProperties: false }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/reports/{id}/pin:
+    post:
+      tags: [reports]
+      summary: 固定/取消固定报告
+      description: report 与 detail 两种保留标记独立设置；固定的报告/明细不被自动清理。
+      operationId: pinReport
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                report_pinned: { type: boolean }
+                detail_pinned: { type: boolean }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ReportSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/reports/{id}/folders:
+    get:
+      tags: [reports]
+      summary: 目录视图
+      description: 按 parent_entry_id 逐层浏览；metric 切换统计口径；稳定游标分页。基于已保存扫描结果，不重新读源目录。
+      operationId: listReportFolders
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - name: parent_entry_id
+          in: query
+          description: 父目录 entry_id（十进制字符串）；缺省为各源根目录层
+          schema: { $ref: '#/components/schemas/DecimalString' }
+        - name: metric
+          in: query
+          schema: { $ref: '#/components/schemas/Metric' }
+        - name: sort
+          in: query
+          schema: { $ref: '#/components/schemas/SortKey' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 目录行分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/FolderRow' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+  /api/v1/reports/{id}/owners:
+    get:
+      tags: [reports]
+      summary: 用户/配额视图
+      description: 按 UID 全局汇总；每行提供各 source_id 的文件数与逻辑字节 breakdown。source_id 筛选存在时仅在所选数据源范围内聚合；未知 UID 仍保留。
+      operationId: listReportOwners
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - name: source_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: uid
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: category_id
+          in: query
+          schema: { $ref: '#/components/schemas/CategoryId' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 用户聚合分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/OwnerRow' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+  /api/v1/reports/{id}/categories:
+    get:
+      tags: [reports]
+      summary: 分类聚合
+      description: 按 category_id 全局汇总；每行提供各 source_id 的文件数、逻辑字节和已分配估算 breakdown。支持范围、排序和稳定游标分页，返回图表与表格共用数据。
+      operationId: listReportCategories
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - name: source_ids
+          in: query
+          style: form
+          explode: true
+          description: 统计范围中的数据源（默认全部数据源）
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+        - name: directory_entry_id
+          in: query
+          description: 目录范围根 entry_id（十进制字符串）
+          schema: { $ref: '#/components/schemas/DecimalString' }
+        - name: include_descendants
+          in: query
+          schema: { type: boolean, default: true }
+        - name: category_ids
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/CategoryId' }
+        - name: metric
+          in: query
+          schema: { $ref: '#/components/schemas/Metric' }
+        - name: sort
+          in: query
+          schema: { $ref: '#/components/schemas/SortKey' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 分类聚合
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/CategoryRow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+  /api/v1/reports/{id}/files:
+    get:
+      tags: [reports]
+      summary: 统一文件明细查询
+      description: 统一 QuerySpec（见 query 参数，语义同 17.4）；全量明细过期返回 410 DETAIL_EXPIRED，不返回空列表冒充。
+      operationId: queryReportFiles
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - name: source_ids
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+        - name: directory_entry_id
+          in: query
+          schema: { $ref: '#/components/schemas/DecimalString' }
+        - name: include_descendants
+          in: query
+          schema: { type: boolean, default: true }
+        - name: category_ids
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/CategoryId' }
+        - name: extensions
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: owner_uids
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: integer, format: int64 }
+        - name: name_contains
+          in: query
+          description: 字面量子串搜索，不当正则或 SQL 处理
+          schema: { type: string }
+        - name: min_size_bytes
+          in: query
+          description: 大小下界（含边界），十进制字符串
+          schema: { $ref: '#/components/schemas/DecimalString' }
+        - name: max_size_bytes
+          in: query
+          description: 大小上界（含边界），十进制字符串
+          schema: { $ref: '#/components/schemas/DecimalString' }
+        - name: mtime_from
+          in: query
+          description: 修改时间下界（含，左闭右开 [from, to)）
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - name: mtime_to
+          in: query
+          description: 修改时间上界（不含）
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - name: atime_from
+          in: query
+          description: 访问时间下界（含，左闭右开 [from, to)）
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - name: atime_to
+          in: query
+          description: 访问时间上界（不含）
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - name: metric
+          in: query
+          schema: { $ref: '#/components/schemas/Metric' }
+        - name: sort
+          in: query
+          schema: { $ref: '#/components/schemas/SortKey' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 文件明细分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/FileRow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+  /api/v1/reports/{id}/rankings/{kind}:
+    get:
+      tags: [reports]
+      summary: 固定排行
+      description: kind=largest（size 降序）/recent（mtime 降序）/least_accessed（atime 升序）；历史固定排行，明细过期仍可查看但不可重新筛选。
+      operationId: getReportRanking
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - name: kind
+          in: path
+          required: true
+          schema: { type: string, enum: [largest, recent, least_accessed] }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 排行分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/RankingRow' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/reports/{id}/duplicates:
+    get:
+      tags: [reports]
+      summary: 重复文件组列表
+      description: 完整/截断组、成员计数、verification；超出 max_listed_files 的组标记截断。
+      operationId: listDuplicateGroups
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - name: complete_only
+          in: query
+          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 重复组分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/DuplicateGroup' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+  /api/v1/reports/{id}/duplicates/{group_id}:
+    get:
+      tags: [reports]
+      summary: 重复组成员
+      description: 完整成员不可用时说明截断原因。
+      operationId: getDuplicateGroup
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - name: group_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 组成员
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [group, members]
+                        properties:
+                          group: { $ref: '#/components/schemas/DuplicateGroup' }
+                          members:
+                            type: array
+                            items: { $ref: '#/components/schemas/DuplicateMember' }
+                          truncated:
+                            type: boolean
+                          truncation_reason: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+  /api/v1/reports/{id}/compare:
+    post:
+      tags: [reports]
+      summary: 报告对比
+      description: |
+        other_report_id + mode=aggregate/files；返回 comparison job（202）。
+        scope_fingerprint/classification_version 不一致时结果带"不完全可比"标记；不兼容返回 REPORT_INCOMPATIBLE(409)。
+        全量文件差异仅在两侧均有明细时计算，否则 410 DETAIL_EXPIRED。
+      operationId: compareReports
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [other_report_id, mode]
+              properties:
+                other_report_id: { type: string, format: uuid }
+                mode: { type: string, enum: [aggregate, files] }
+      responses:
+        '202':
+          description: 对比任务已入队
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [comparison_id, job_id]
+                        properties:
+                          comparison_id: { type: string, format: uuid }
+                          job_id: { type: string, format: uuid }
+                          comparable: { type: boolean, description: scope_fingerprint 与 classification_version 是否一致 }
+                          incompatibility_reasons:
+                            type: array
+                            items: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+  /api/v1/comparisons/{id}:
+    get:
+      tags: [reports]
+      summary: 获取报告对比结果
+      description: |
+        返回对比任务的持久结果。结果状态为 pending、succeeded 或 failed；
+        section 可按 folders、owners、categories、files 筛选，rows 使用服务端签名游标分页。
+        对比结果独立于任务进度保存，不能把 pending 结果当成空结果。
+      operationId: getComparison
+      parameters:
+        - $ref: '#/components/parameters/ComparisonId'
+        - name: section
+          in: query
+          required: false
+          description: 只返回指定对比栏目
+          schema: { type: string, enum: [folders, owners, categories, files] }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 对比结果及分页明细
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ComparisonResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/reports/{id}/exports:
+    post:
+      tags: [reports]
+      summary: 创建导出
+      description: section、format、QuerySpec、scope=current/all；后台流式生成，返回 export_id/job_id（202）。CSV 与页面使用同一规范化 QuerySpec 与 query_hash。
+      operationId: createExport
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [section, format, scope]
+              properties:
+                section:
+                  type: string
+                  enum: [volume, folders, owners, quota, categories, duplicates, largest, recently_modified, least_accessed, files, full_report]
+                format: { type: string, enum: [csv, json, html, zip] }
+                scope:
+                  type: string
+                  enum: [current, all]
+                  description: current=当前筛选，all=整个栏目
+                query:
+                  $ref: '#/components/schemas/QuerySpec'
+      responses:
+        '202':
+          description: 导出任务已入队
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [export_id, job_id]
+                        properties:
+                          export_id: { type: string, format: uuid }
+                          job_id: { type: string, format: uuid }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- exports
+  /api/v1/exports/{id}:
+    get:
+      tags: [exports]
+      summary: 导出状态
+      operationId: getExport
+      parameters:
+        - $ref: '#/components/parameters/ExportId'
+      responses:
+        '200':
+          description: 导出状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ExportRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/exports/{id}/download:
+    get:
+      tags: [exports]
+      summary: 导出下载
+      description: 经过身份检查的流式下载；短期下载 URL 不能绕过应用管理员权限。
+      operationId: downloadExport
+      parameters:
+        - $ref: '#/components/parameters/ExportId'
+      responses:
+        '200':
+          description: 文件流
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+
+  # ---------------------------------------------------------------- cleanup
+  /api/v1/cleanup/plans:
+    post:
+      tags: [cleanup]
+      summary: 创建清理预览计划
+      description: |
+        提交 report_id、duplicate_group_ids、每组保留 entry_id 与拟处理 entry_id；不接收路径。
+        返回不可变 plan_id、选中数、逻辑总量、无法处理条目、保留副本、风险说明、预期动作 quarantine、校验版本与 5 分钟到期时间。
+        后端校验条目同组且每组至少保留一份；保护目录/硬链接/符号链接/范围外文件一律拒绝。
+      operationId: createCleanupPlan
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CleanupPlanRequest' }
+      responses:
+        '200':
+          description: 预览计划
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/CleanupPlan' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/cleanup/plans/{id}/execute:
+    post:
+      tags: [cleanup]
+      summary: 执行清理计划
+      description: |
+        需 reauth_token（5 分钟内）、确认文本与 Idempotency-Key；重复提交返回同一 action job（202）。
+        计划过期返回 410 PLAN_EXPIRED；条目身份/内容变化返回 409 FILE_CHANGED；并发占用返回 409 QUARANTINE_CONFLICT。
+      operationId: executeCleanupPlan
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reauth_token, confirmation]
+              properties:
+                reauth_token: { type: string }
+                confirmation:
+                  type: string
+                  description: 确认文本，必须为服务端在预览中给出的固定字符串
+      responses:
+        '202':
+          description: 清理 action job 已入队
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [action_id, job_id]
+                        properties:
+                          action_id: { type: string, format: uuid }
+                          job_id: { type: string, format: uuid }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/cleanup/actions/{id}:
+    get:
+      tags: [cleanup]
+      summary: 清理动作详情
+      description: 条目级日志与状态（PLANNED→VALIDATING→MOVING→QUARANTINED→RESTORED|PURGED，及 SKIPPED/FAILED/CONFLICT）。
+      operationId: getCleanupAction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 清理动作详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/CleanupAction' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/cleanup/quarantine:
+    get:
+      tags: [cleanup]
+      summary: 隔离区列表
+      description: 隔离项、风险、关联计划；隔离不是释放空间，界面需显示"已隔离，尚未释放磁盘空间"。
+      operationId: listQuarantine
+      parameters:
+        - name: source_id
+          in: query
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 隔离项分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/QuarantineItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/cleanup/quarantine/{id}/restore:
+    post:
+      tags: [cleanup]
+      summary: 恢复隔离项
+      description: 恢复到原 source_id 与原相对路径；这是文件系统写操作，需近期重新认证。原位置已存在时默认拒绝（409），可选择 new_name 但不得覆盖；相同 Idempotency-Key 返回同一个 action job。
+      operationId: restoreQuarantineItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reauth_token]
+              properties:
+                reauth_token: { type: string, description: 5 分钟内一次性重新认证令牌 }
+                new_name: { type: string, description: 原位置被占用时的新名称，仍不允许覆盖已有文件 }
+      responses:
+        '202':
+          description: 恢复 action job 已入队
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [job_id]
+                        properties:
+                          job_id: { type: string, format: uuid }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/cleanup/quarantine/{id}/purge:
+    post:
+      tags: [cleanup]
+      summary: 永久删除隔离项
+      description: 需重新认证和确认；安全检查（身份与剩余副本核验）后永久删除，不可撤销。保留副本失效返回 409 NO_SURVIVING_COPY。
+      operationId: purgeQuarantineItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reauth_token, confirmation]
+              properties:
+                reauth_token: { type: string }
+                confirmation: { type: string, description: 确认文本，明确永久删除不可撤销 }
+      responses:
+        '202':
+          description: 永久删除 action job 已入队
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [job_id]
+                        properties:
+                          job_id: { type: string, format: uuid }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  # ---------------------------------------------------------------- settings
+  /api/v1/settings/categories:
+    get:
+      tags: [settings]
+      summary: 当前分类规则集
+      description: 返回当前生效规则集；9 个固定分类 ID，历史规则集不可变。
+      operationId: getCategoryRules
+      responses:
+        '200':
+          description: 当前规则集
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/CategoryRuleset' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [settings]
+      summary: 更新分类规则
+      description: 校验规则（扩展名字符合法、一个扩展名只属于一个类别、冲突拒绝）后创建新版本规则集，不覆盖历史；报告保存规则版本快照。
+      operationId: putCategoryRules
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryRulesetInput' }
+      responses:
+        '200':
+          description: 新规则集版本
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/CategoryRuleset' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/settings/notifications:
+    get:
+      tags: [settings]
+      summary: 通知配置
+      description: SMTP 配置；密钥回显始终打码（masked）。
+      operationId: getNotificationSettings
+      responses:
+        '200':
+          description: 通知配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/NotificationConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [settings]
+      summary: 更新通知配置
+      description: 校验收件人地址（防 CRLF 注入）；password 留空表示不修改，回显始终打码。默认要求 TLS 且校验证书，非 TLS 仅明确的内网调试模式。
+      operationId: putNotificationSettings
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationConfigInput' }
+      responses:
+        '200':
+          description: 已更新（密钥打码）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/NotificationConfig' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/settings/notifications/test:
+    post:
+      tags: [settings]
+      summary: 发送测试邮件
+      description: 真正发送测试邮件并记录审计，不返回假成功。
+      operationId: testNotification
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipient: { type: string, format: email, description: 缺省发送到默认收件人 }
+      responses:
+        '200':
+          description: 发送结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [delivered]
+                        properties:
+                          delivered: { type: boolean }
+                          detail: { type: string, description: 脱敏的发送结果说明 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/settings/storage:
+    get:
+      tags: [settings]
+      summary: 存储预算设置
+      description: 应用数据预算（默认 20 GiB）与当前用量；只能在部署边界内修改。
+      operationId: getStorageSettings
+      responses:
+        '200':
+          description: 存储设置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/StorageSettings' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [settings]
+      summary: 更新存储预算
+      description: 预算不得超过部署配置上限；达到预算先清理缓存与过期导出。
+      operationId: putStorageSettings
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StorageSettingsInput' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/StorageSettings' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/settings/retention:
+    get:
+      tags: [settings]
+      summary: 保留策略设置
+      description: 默认报告/明细保留策略与隔离区自动清理策略（最短 7 天，默认关闭）。
+      operationId: getRetentionSettings
+      responses:
+        '200':
+          description: 保留策略
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/RetentionSettings' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [settings]
+      summary: 更新保留策略
+      description: 在部署边界内修改默认策略；任务级保留策略仍以 Profile 为准。
+      operationId: putRetentionSettings
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RetentionSettingsInput' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/RetentionSettings' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  # ---------------------------------------------------------------- metadata import
+  /api/v1/metadata/import/preview:
+    post:
+      tags: [metadata]
+      summary: 元数据导入预览
+      description: 按 metadata-import.schema.json 校验 JSON schema/作用域/源匹配，不写入；返回 preview_id、digest 与差异摘要。
+      operationId: previewMetadataImport
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MetadataImportPayload' }
+      responses:
+        '200':
+          description: 预览结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ImportPreview' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/metadata/import/apply:
+    post:
+      tags: [metadata]
+      summary: 应用元数据导入
+      description: preview_id + digest + 再确认，原子应用；digest 不匹配返回 409。
+      operationId: applyMetadataImport
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preview_id, digest, confirmation]
+              properties:
+                preview_id: { type: string, format: uuid }
+                digest: { type: string, description: 预览返回的内容摘要（SHA-256 hex） }
+                confirmation: { type: string }
+      responses:
+        '200':
+          description: 应用结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [applied]
+                        properties:
+                          applied: { type: boolean }
+                          identities_applied: { type: integer }
+                          source_links_applied: { type: integer }
+                          quotas_applied: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+
+  # ---------------------------------------------------------------- backup / restore
+  /api/v1/settings/backup:
+    post:
+      tags: [backup]
+      summary: 创建配置备份
+      description: 创建不含秘密（密码/会话/SMTP 秘密/主密钥）的配置导出 job（202）；含秘密备份需用户提供口令的认证加密。
+      operationId: createBackup
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  properties:
+                    include_secrets: { type: boolean, const: false, default: false }
+                  additionalProperties: false
+                - type: object
+                  required: [include_secrets, secrets_passphrase]
+                  properties:
+                    include_secrets: { type: boolean, const: true }
+                    secrets_passphrase:
+                      type: string
+                      minLength: 1
+                      format: password
+                      description: 使用标准认证加密格式；仅在请求含秘密备份时传输
+                  additionalProperties: false
+      responses:
+        '202':
+          description: 备份 job 已入队
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [job_id]
+                        properties:
+                          job_id: { type: string, format: uuid }
+                          export_id: { type: string, format: uuid }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/settings/restore/preview:
+    post:
+      tags: [backup]
+      summary: 恢复预览
+      description: 验证配置版本、差异和部署边界；不写入。超出版力范围的配置被拒绝而非静默扩展边界。
+      operationId: previewRestore
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [backup_export_id]
+              properties:
+                backup_export_id: { type: string, format: uuid }
+                secrets_passphrase:
+                  type: string
+                  minLength: 1
+                  format: password
+                  description: 加密备份必填；仅在本次请求内使用，不写入任务、审计或日志
+      responses:
+        '200':
+          description: 恢复预览
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [preview_id, compatible, config_version]
+                        properties:
+                          preview_id: { type: string, format: uuid }
+                          compatible: { type: boolean }
+                          config_version: { type: integer }
+                          differences:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                key: { type: string }
+                                change: { type: string, enum: [added, removed, modified] }
+                          warnings:
+                            type: array
+                            items: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/settings/restore/apply:
+    post:
+      tags: [backup]
+      summary: 应用恢复
+      description: 确认并备份现有配置后原子更新；需 reauth_token 与确认文本。加密备份需提供同一口令；口令仅在本次请求内使用，不写入任务、审计或日志。
+      operationId: applyRestore
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preview_id, reauth_token, confirmation]
+              properties:
+                preview_id: { type: string, format: uuid }
+                reauth_token: { type: string }
+                confirmation: { type: string }
+                secrets_passphrase:
+                  type: string
+                  minLength: 1
+                  format: password
+                  description: 加密备份的恢复口令；仅在本次请求内使用，不写入任务、审计或日志
+      responses:
+        '200':
+          description: 已应用
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [applied, pre_restore_backup_export_id]
+                        properties:
+                          applied: { type: boolean }
+                          pre_restore_backup_export_id: { type: string, format: uuid, description: 应用前自动创建的现有配置备份 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+
+  # ---------------------------------------------------------------- diagnostics / audit
+  /api/v1/diagnostics:
+    get:
+      tags: [diagnostics]
+      summary: 诊断信息
+      description: 应用/SQLite/构建版本、架构、运行身份、内核能力、只读边界、数据目录剩余空间、扫描队列、进程资源和源状态；脱敏输出，不泄露凭据。
+      operationId: getDiagnostics
+      responses:
+        '200':
+          description: 诊断信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/DiagnosticInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/audit:
+    get:
+      tags: [audit]
+      summary: 审计日志
+      description: 分页脱敏输出，不泄露凭据与不受限文件路径。
+      operationId: listAuditEvents
+      parameters:
+        - name: actor_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - name: to
+          in: query
+          description: 上界（不含，左闭右开）
+          schema: { $ref: '#/components/schemas/DateTime' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 审计事件分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/ListMetaMixin'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/AuditEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------------------------------------------------------- health (无 /api/v1 前缀)
+  /health/live:
+    get:
+      tags: [health]
+      summary: 存活探针
+      description: 只检查进程存活；无需认证。
+      operationId: healthLive
+      security: []
+      responses:
+        '200':
+          description: 进程存活
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+  /health/ready:
+    get:
+      tags: [health]
+      summary: 就绪探针
+      description: 检查数据库和配置是否可服务；不因某一个扫描源离线判死整个应用。未初始化时返回受限就绪状态，避免阻止管理员完成初始化。
+      operationId: healthReady
+      security: []
+      responses:
+        '200':
+          description: 可服务（含未初始化时的受限就绪）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, initialized]
+                properties:
+                  status: { type: string, enum: [ready, initializing] }
+                  initialized: { type: boolean }
+                  checks:
+                    type: object
+                    properties:
+                      database: { type: string, enum: [ok, failed] }
+                      config: { type: string, enum: [ok, failed] }
+        '503':
+          description: 不可服务
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [not_ready] }
+
+# ==================================================================== components
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: nas_analyzer_session
+      description: HttpOnly、SameSite=Lax 会话 Cookie；HTTPS 模式必须 Secure。setup/login/health 除外均需会话。
+
+  parameters:
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 幂等键；重复提交返回同一个 job/action，不重复执行。
+      schema: { type: string, maxLength: 128 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: 当前 Profile 版本（来自 GET 的 ETag）；不匹配返回 409。
+      schema: { type: string }
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: SSE 断线重连时携带的最近事件 sequence；事件已过期则服务端先发送 state snapshot。
+      schema: { type: integer, format: int64 }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: 服务端签名的稳定游标（含 report_id、dataset_version、sort key、last_entry_id、query_hash）；筛选改变后旧 cursor 返回 409。
+      schema: { type: string }
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      description: 默认 50，上限 200。
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    AdminId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MountKey:
+      name: key
+      in: path
+      required: true
+      schema: { type: string }
+    SourceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    VolumeId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ProfileId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    JobId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ReportId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ComparisonId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ExportId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: 400 格式错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unauthorized:
+      description: 401 未登录
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: 403 未授权/只读（READ_ONLY_MODE、FORBIDDEN 等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: 404 不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Conflict:
+      description: 409 状态/版本/身份冲突（SOURCE_IDENTITY_CHANGED、FILE_CHANGED、QUARANTINE_CONFLICT、JOB_STATE_CONFLICT、REPORT_INCOMPATIBLE、cursor 失效等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Gone:
+      description: 410 明细或计划过期（DETAIL_EXPIRED、PLAN_EXPIRED、导出过期）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unprocessable:
+      description: 422 业务校验失败（VALIDATION_FAILED、PROTECTED_FILE、HARDLINK_NOT_ALLOWED、HASH_INCOMPLETE 等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    TooManyRequests:
+      description: 429 限流（登录限速、RESOURCE_BUSY、RESOURCE_BUDGET_EXCEEDED 等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ServiceUnavailable:
+      description: 503 容量/能力暂不可用（SETUP_REQUIRED、SOURCE_UNAVAILABLE、INSUFFICIENT_DATA_SPACE、UNSUPPORTED_CAPABILITY 等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  schemas:
+    # ------------------------------------------------------------ primitives
+    DecimalString:
+      type: string
+      pattern: '^[0-9]+$'
+      description: 非负整数十进制字符串；用于字节数、inode/device id 等可能超过 2^53 的数值，不走 JSON number。
+      example: '1099511627776'
+    DateTime:
+      type: string
+      format: date-time
+      description: RFC3339 UTC 时间。
+    FileTime:
+      type: object
+      description: 文件时间：RFC3339 展示字段 + 秒/纳秒原始字段；无法表达时全 null 并给原因。
+      required: [rfc3339, sec, nsec]
+      properties:
+        rfc3339:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+        sec:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        nsec:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 999999999
+        unavailable_reason:
+          type: [string, 'null']
+          description: 时间为 null 时的原因（如 atime 被禁用、文件系统不支持）
+
+    # ------------------------------------------------------------ envelopes
+    SuccessEnvelope:
+      type: object
+      required: [data, meta, request_id]
+      properties:
+        data:
+          description: 业务负载，按各端点定义
+        meta:
+          type: object
+          additionalProperties: true
+        request_id:
+          type: string
+          format: uuid
+    ListMetaMixin:
+      type: object
+      description: 列表响应的 meta 字段（spec 17.1）
+      properties:
+        meta:
+          type: object
+          required: [next_cursor, page_size, total_known, truncated, detail_available]
+          properties:
+            next_cursor:
+              type: [string, 'null']
+              description: 服务端签名游标；null 表示没有下一页
+            page_size: { type: integer }
+            total_known:
+              type: [integer, 'null']
+              description: 未知总数为 null，不做慢 COUNT(*)
+            truncated: { type: boolean }
+            detail_available:
+              type: boolean
+              description: 全量明细是否仍在保留期内；false 时筛选能力受限
+    ErrorCode:
+      type: string
+      description: |
+        稳定错误码与 HTTP 映射（spec 17.1）：
+        - 400 格式错误（BAD_REQUEST）与 PATH_OUTSIDE_ROOT（spec 3.3/ACC-004 固定 400）；401 未登录；403 READ_ONLY_MODE / FORBIDDEN；404 不存在。
+        - 409 CONFLICT / SOURCE_IDENTITY_CHANGED / FILE_CHANGED / QUARANTINE_CONFLICT / JOB_STATE_CONFLICT / REPORT_INCOMPATIBLE / NO_SURVIVING_COPY（副本失效冲突）/ cursor 失效。
+        - 410 DETAIL_EXPIRED / PLAN_EXPIRED。
+        - 422 VALIDATION_FAILED / PROTECTED_FILE / HARDLINK_NOT_ALLOWED / HASH_INCOMPLETE 及一般业务校验。
+        - 429 RATE_LIMITED / RESOURCE_BUSY / RESOURCE_BUDGET_EXCEEDED（含登录限流）。
+        - 503 SETUP_REQUIRED（spec 3.3 初始化前业务接口）/ SOURCE_UNAVAILABLE / INSUFFICIENT_DATA_SPACE / UNSUPPORTED_CAPABILITY。
+        前端不解析 message 文本做逻辑判断。
+      enum:
+        - SETUP_REQUIRED
+        - READ_ONLY_MODE
+        - PATH_OUTSIDE_ROOT
+        - SOURCE_IDENTITY_CHANGED
+        - SOURCE_UNAVAILABLE
+        - DETAIL_EXPIRED
+        - REPORT_INCOMPATIBLE
+        - FILE_CHANGED
+        - HASH_INCOMPLETE
+        - PLAN_EXPIRED
+        - PROTECTED_FILE
+        - HARDLINK_NOT_ALLOWED
+        - NO_SURVIVING_COPY
+        - QUARANTINE_CONFLICT
+        - INSUFFICIENT_DATA_SPACE
+        - UNSUPPORTED_CAPABILITY
+        - JOB_STATE_CONFLICT
+        - RESOURCE_BUSY
+        - RESOURCE_BUDGET_EXCEEDED
+        - VALIDATION_FAILED
+        - NOT_FOUND
+        - CONFLICT
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - RATE_LIMITED
+        - BAD_REQUEST
+        - INTERNAL
+    ErrorEnvelope:
+      type: object
+      required: [error, request_id]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string, description: 面向人的错误说明（中文），不用于程序逻辑 }
+            details:
+              type: object
+              additionalProperties: true
+              description: 结构化上下文，如 {source_id, reason}
+        request_id:
+          type: string
+          format: uuid
+      example:
+        error:
+          code: SOURCE_UNAVAILABLE
+          message: 数据源不可访问，请检查挂载或解锁状态。
+          details:
+            source_id: source-uuid
+            reason: not_mounted
+        request_id: request-uuid
+
+    # ------------------------------------------------------------ enums (contracts/domain-enums.json)
+    JobState:
+      type: string
+      enum: [QUEUED, RUNNING, PAUSING, PAUSED, CANCELLING, CANCELLED, SUCCEEDED, PARTIAL, FAILED, INTERRUPTED]
+    JobPhase:
+      type: string
+      enum: [PRECHECK, ENUMERATE, HASH, AGGREGATE, PUBLISH, NOTIFY]
+    SectionQuality:
+      type: string
+      enum: [complete, partial, skipped, unavailable]
+    SourceAvailability:
+      type: string
+      enum: [online, offline, permission_denied, unknown]
+      description: 不可用值不转换成零容量
+    SourceStorageKind:
+      type: string
+      enum: [local, remote, tiered, unknown]
+      description: 非 local 默认禁止内容读取
+    SourceReadPolicy:
+      type: string
+      enum: [metadata_only, content_allowed]
+    CategoryId:
+      type: string
+      description: 9 个固定分类 ID
+      enum: [audio, disk_images, documents, executables, pictures, videos, web_and_code, archives, other]
+    CleanupItemState:
+      type: string
+      enum: [PLANNED, VALIDATING, MOVING, QUARANTINED, RESTORED, PURGED, SKIPPED, FAILED, CONFLICT]
+    JobType:
+      type: string
+      enum: [scan, compare, export, cleanup, backup]
+    Metric:
+      type: string
+      enum: [logical_bytes, allocated_estimate_bytes, file_count]
+      default: logical_bytes
+      description: 统计口径；容量定义见 spec 5.1
+    SortKey:
+      type: string
+      enum: [size_desc, size_asc, mtime_desc, mtime_asc, atime_desc, atime_asc, name_asc, count_desc]
+      default: size_desc
+      description: 排序枚举白名单；并列时以 source_id 与原始路径字节序稳定排序
+
+    # ------------------------------------------------------------ auth / admins
+    AdminUser:
+      type: object
+      required: [id, username, enabled, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        enabled: { type: boolean }
+        created_at: { $ref: '#/components/schemas/DateTime' }
+
+    # ------------------------------------------------------------ mounts / sources / volumes
+    MountRoot:
+      type: object
+      required: [key, container_path, readable, writable, allow_write_operations]
+      properties:
+        key: { type: string, description: 部署配置中的批准挂载键 }
+        container_path: { type: string, description: 容器内路径（仅供展示，不参与授权） }
+        host_path_display:
+          type: [string, 'null']
+          description: 可选宿主路径展示字符串，不能反向授权文件操作
+        readable: { type: boolean }
+        writable: { type: boolean }
+        allow_write_operations: { type: boolean, description: 部署级写开关 }
+    Source:
+      type: object
+      required: [id, name, mount_key, relative_root_base64, relative_root, storage_kind, read_policy, write_enabled, protected, exclusions, identity_status, availability, atime_quality, identity_epoch, deleted_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 80, description: 全局唯一显示名 }
+        mount_key: { type: string }
+        relative_root_base64: { type: string, format: byte, description: 原始相对路径字节的 Base64 表示；仅用于展示/管理员导出，不用于授权文件操作 }
+        relative_root: { type: string, description: 挂载根内相对路径，不能是绝对路径或含越界组件 }
+        volume_id:
+          type: [string, 'null']
+          format: uuid
+          description: null 时不计入全局容量求和
+        storage_kind: { $ref: '#/components/schemas/SourceStorageKind' }
+        read_policy: { $ref: '#/components/schemas/SourceReadPolicy' }
+        write_enabled: { type: boolean, default: false, description: 仅允许对部署明确可写的源开启 }
+        protected: { type: boolean, default: false, description: 备份/数据库等源禁用内容清理 }
+        exclusions:
+          type: array
+          items: { type: string }
+          description: 源级排除 glob 规则
+        identity_status:
+          type: string
+          enum: [verified, provisional, changed]
+          description: changed 后要求管理员重新确认
+        availability: { $ref: '#/components/schemas/SourceAvailability' }
+        atime_quality:
+          type: string
+          enum: [reliable, relative, disabled, unknown]
+        identity_epoch: { type: integer, format: int64, description: 身份确认纪元，confirm-identity 后递增 }
+        deleted_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+        created_at: { $ref: '#/components/schemas/DateTime' }
+        updated_at: { $ref: '#/components/schemas/DateTime' }
+    SourceCreate:
+      type: object
+      required: [name, mount_key]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        mount_key: { type: string }
+        relative_root: { type: string, default: '', description: 与 relative_root_base64 二选一；挂载根内相对路径 }
+        relative_root_base64: { type: string, format: byte, description: 原始相对路径字节的 Base64 表示；与 relative_root 二选一 }
+        volume_id:
+          type: [string, 'null']
+          format: uuid
+        storage_kind: { $ref: '#/components/schemas/SourceStorageKind' }
+        read_policy: { $ref: '#/components/schemas/SourceReadPolicy' }
+        write_enabled: { type: boolean, default: false }
+        protected: { type: boolean, default: false }
+        exclusions:
+          type: array
+          items: { type: string }
+    SourceUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        read_policy: { $ref: '#/components/schemas/SourceReadPolicy' }
+        write_enabled: { type: boolean }
+        exclusions:
+          type: array
+          items: { type: string }
+    SourceProbe:
+      type: object
+      additionalProperties: false
+      required: [availability, mounted, traversable, sampled_entries, sample_truncated, read_only, fs_identity, identity_changed, error, capabilities]
+      properties:
+        availability: { $ref: '#/components/schemas/SourceAvailability' }
+        mounted: { type: boolean, description: 是否能在批准挂载内打开源根 }
+        traversable: { type: boolean, description: 是否能读取源根目录条目 }
+        sampled_entries: { type: integer, minimum: 0, description: 有界探测样本中的条目数 }
+        sample_truncated: { type: boolean, description: 探测样本是否达到上限 }
+        read_only:
+          type: [boolean, 'null']
+          description: 挂载读写状态；无法从 mountinfo 得到时为 null
+        fs_identity:
+          anyOf:
+            - $ref: '#/components/schemas/FsIdentity'
+            - type: 'null'
+          description: 当前文件系统身份；不可用时为 null
+        identity_changed: { type: boolean, description: 当前身份是否不同于已确认身份 }
+        error: { type: [string, 'null'], description: 探测错误；没有错误时为 null }
+        capabilities:
+          type: object
+          additionalProperties: false
+          required: [atime_quality, filesystem_type, btrfs_shared_block_risk, can_read_content, can_write, identity_observed, notes]
+          properties:
+            atime_quality: { type: string, enum: [reliable, relative, disabled, unknown] }
+            filesystem_type: { type: [string, 'null'], description: 只读探测到的文件系统类型；无法取得时为 null }
+            btrfs_shared_block_risk:
+              type: string
+              enum: [possible, not_detected, unknown]
+              description: 检测到 Btrfs 时共享块可能存在；分析器不实现 qgroup referenced/exclusive 测量，也不提供保证释放字节
+            can_read_content: { type: boolean }
+            can_write: { type: boolean }
+            identity_observed: { type: boolean, description: 是否观测到可用于身份确认的卷/设备信息 }
+            notes:
+              type: array
+              items: { type: string }
+    FsIdentity:
+      type: object
+      additionalProperties: false
+      required: [device_id, mount_fsid]
+      properties:
+        device_id: { $ref: '#/components/schemas/DecimalString' }
+        mount_fsid: { type: [string, 'null'] }
+    Volume:
+      type: object
+      required: [id, name, status]
+      properties:
+        id: { type: string, format: uuid, description: 持久 UUID，不以挂载路径或单次 st_dev 作为永久身份 }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        capacity_source_id:
+          type: [string, 'null']
+          format: uuid
+          description: 管理员确认的容量采样源
+        status: { type: string, enum: [active, disconnected, retired], description: 断连后保留历史采样，新采样为空洞 }
+        identity:
+          type: object
+          description: 辅助识别信息（文件系统 ID、设备号、导入的宿主 UUID），device id 为十进制字符串
+          properties:
+            fs_uuid: { type: [string, 'null'] }
+            device_id:
+              anyOf:
+                - $ref: '#/components/schemas/DecimalString'
+                - type: 'null'
+            imported_host_uuid: { type: [string, 'null'] }
+        last_sample:
+          anyOf:
+            - $ref: '#/components/schemas/VolumeSample'
+            - type: 'null'
+        created_at: { $ref: '#/components/schemas/DateTime' }
+    VolumeSample:
+      type: object
+      required: [volume_id, sample_time, quality]
+      properties:
+        volume_id: { type: string, format: uuid }
+        sample_time: { $ref: '#/components/schemas/DateTime' }
+        total_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        total_min_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+          description: resolution=day 时该 UTC 日观测到的最小值
+        total_max_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+          description: resolution=day 时该 UTC 日观测到的最大值
+        free_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        free_min_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        free_max_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        available_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        available_min_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        available_max_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        used_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        used_min_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        used_max_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        quality:
+          type: string
+          enum: [complete, partial, unavailable]
+          description: 日聚合可能为 partial；原始采样 ok→complete、error→unavailable；不可用返回 null，不伪造 0
+        error: { type: [string, 'null'] }
+
+    # ------------------------------------------------------------ notifications
+    InternalNotification:
+      type: object
+      required: [id, kind, title, body, severity, read_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        title: { type: string }
+        body: { type: string }
+        severity: { type: string, enum: [info, warning, error] }
+        read_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+        created_at: { $ref: '#/components/schemas/DateTime' }
+
+    # ------------------------------------------------------------ profiles
+    ProfileSection:
+      type: string
+      enum: [volume, folders, owners, quota, categories, duplicates, largest, recently_modified, least_accessed]
+    ProfileScope:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [all, selected]
+        source_ids:
+          type: array
+          items: { type: string, format: uuid }
+        include_future_registered: { type: boolean, default: false }
+        include_globs:
+          type: array
+          items: { type: string }
+        exclude_globs:
+          type: array
+          items: { type: string }
+        file_kind_policy:
+          type: string
+          enum: [regular_only, all_metadata]
+          default: regular_only
+    ProfileDuplicates:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        match_name: { type: boolean, default: false }
+        match_mtime: { type: boolean, default: false }
+        min_size_bytes:
+          allOf:
+            - $ref: '#/components/schemas/DecimalString'
+          default: '1'
+        max_size_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        max_listed_files: { type: integer, default: 5000, description: 报告内重复列表上限，超出标记截断 }
+        hash_budget_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+          description: 内容哈希读取预算；null 表示不限制
+        content_read_policy:
+          type: string
+          enum: [respect_source_policy, allow_remote_recall]
+          default: respect_source_policy
+    ProfileSchedule:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [manual, daily, weekly, monthly, cron]
+        expression: { type: string, description: 五段 cron；每月 31 日在无该日月份跳过 }
+        time_of_day: { type: string, description: HH:MM 本地时间 }
+        days_of_week: { type: array, items: { type: integer, minimum: 0, maximum: 6 }, description: 0=周日至6=周六 }
+        day_of_month: { type: integer, minimum: 1, maximum: 31 }
+        timezone: { type: string, description: IANA 时区名；落库时间统一 UTC }
+        misfire_policy:
+          type: string
+          enum: [skip, run_once]
+          default: skip
+          description: run_once 最多补跑一次，默认只接受过去 6 小时内最近一次
+        overlap_policy:
+          type: string
+          enum: [skip, coalesce_once]
+          default: coalesce_once
+          description: 同一 Profile 默认不重叠；重叠触发合并成至多一次后续执行
+    ProfileRetention:
+      type: object
+      properties:
+        report_keep_count: { type: integer, default: 30, minimum: 1 }
+        detail_keep_count: { type: integer, default: 3, minimum: 0, description: 完整明细保留运行次数；pinned 例外 }
+    ProfileNotifications:
+      type: object
+      properties:
+        recipients:
+          type: array
+          items: { type: string, format: email }
+        notify_on:
+          type: array
+          items:
+            type: string
+            enum: [succeeded, partial, failed]
+        attach_summary: { type: boolean, default: false, description: 附简要 CSV，默认上限 5 MiB }
+        public_base_url: { type: [string, 'null'], description: 邮件中认证报告链接的基地址 }
+    ProfileResources:
+      type: object
+      properties:
+        metadata_workers: { type: integer, minimum: 1 }
+        hash_workers: { type: integer, minimum: 1 }
+        read_limit_mib_s: { type: integer, minimum: 1 }
+        io_priority: { type: string, enum: [low, normal] }
+    ProfileConfig:
+      type: object
+      description: 任务配置（创建/PATCH 请求体；见 contracts/profile-create.example.json）
+      required: [name, enabled, scope, sections]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        description: { type: [string, 'null'] }
+        enabled: { type: boolean }
+        scope: { $ref: '#/components/schemas/ProfileScope' }
+        sections:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/ProfileSection' }
+          description: 至少一个栏目；依赖明细的栏目自动启用元数据收集
+        owner_ids_to_list:
+          type: array
+          items: { type: integer, format: int64 }
+          description: 附加分组清单，不默认过滤整个报告
+        duplicates: { $ref: '#/components/schemas/ProfileDuplicates' }
+        rank_limit: { type: integer, default: 200, minimum: 1, maximum: 10000 }
+        schedule: { $ref: '#/components/schemas/ProfileSchedule' }
+        retention: { $ref: '#/components/schemas/ProfileRetention' }
+        notifications: { $ref: '#/components/schemas/ProfileNotifications' }
+        resources: { $ref: '#/components/schemas/ProfileResources' }
+    Profile:
+      allOf:
+        - $ref: '#/components/schemas/ProfileConfig'
+        - type: object
+          required: [id, version, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            version: { type: integer, format: int64, description: 当前版本；运行实例保存参数副本和版本 }
+            next_run_at:
+              anyOf:
+                - $ref: '#/components/schemas/DateTime'
+                - type: 'null'
+            deleted_at:
+              anyOf:
+                - $ref: '#/components/schemas/DateTime'
+                - type: 'null'
+            created_at: { $ref: '#/components/schemas/DateTime' }
+            updated_at: { $ref: '#/components/schemas/DateTime' }
+
+    # ------------------------------------------------------------ jobs / SSE
+    JobProgress:
+      type: object
+      description: 进度计数；枚举总量未知时用不定进度，不用上次扫描数量假装精确
+      properties:
+        directories_visited: { type: integer, format: int64 }
+        files_visited: { type: integer, format: int64 }
+        errors: { type: integer, format: int64 }
+        bytes_read: { $ref: '#/components/schemas/DecimalString' }
+        elapsed_ms: { type: integer, format: int64 }
+        hash_candidate_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+          description: 哈希阶段已确定候选字节数
+        hash_candidate_set_stable: { type: [boolean, 'null'], description: 候选集合是否已稳定 }
+    Job:
+      type: object
+      required: [id, type, state, requested_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/JobType' }
+        state: { $ref: '#/components/schemas/JobState' }
+        phase:
+          anyOf:
+            - $ref: '#/components/schemas/JobPhase'
+            - type: 'null'
+          description: RUNNING 内部阶段；未开启重复分析时跳过 HASH
+        profile_id:
+          type: [string, 'null']
+          format: uuid
+        profile_version:
+          type: [integer, 'null']
+          format: int64
+        run_id:
+          type: [string, 'null']
+          format: uuid
+        progress: { $ref: '#/components/schemas/JobProgress' }
+        requested_at: { $ref: '#/components/schemas/DateTime' }
+        started_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+        finished_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+        heartbeat_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+        retry_of:
+          type: [string, 'null']
+          format: uuid
+        error:
+          type: [object, 'null']
+          description: 错误摘要；通知失败不把已完成数据报告改成失败
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string }
+    SseEventFrame:
+      type: object
+      description: 实际 SSE 传输帧的字段化表示；原始线格式为 id、event、data 三行加空行。
+      required: [id, event, data]
+      properties:
+        id:
+          type: string
+          pattern: '^[0-9]+$'
+          description: 事件 sequence 的十进制文本，用于 Last-Event-ID 恢复
+        event:
+          type: string
+          enum: [job.state, job.progress, job.warning, job.completed, heartbeat, scan.progress, scan.cancel_requested, scan.completed, job.finished]
+        data:
+          type: string
+          description: JSON 序列化的事件 payload 文本；不是包含 sequence/type 的完整事件对象
+    JobEvent:
+      type: object
+      description: 持久事件记录的解码模型；实际 SSE 传输格式见 SseEventFrame
+      required: [sequence, type, created_at]
+      properties:
+        sequence: { type: integer, format: int64 }
+        type:
+          type: string
+          enum: [job.state, job.progress, job.warning, job.completed, heartbeat, scan.progress, scan.cancel_requested, scan.completed, job.finished]
+        payload:
+          type: object
+          additionalProperties: true
+        created_at: { $ref: '#/components/schemas/DateTime' }
+
+    # ------------------------------------------------------------ reports
+    ReportSummary:
+      type: object
+      required: [id, run_id, profile_id, profile_version, status, consistency, detail_available, pinned, detail_pinned, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        profile_id:
+          type: [string, 'null']
+          format: uuid
+        profile_version: { type: [integer, 'null'], format: int64 }
+        status: { type: string, enum: [succeeded, partial, failed] }
+        consistency: { type: string, description: 报告发布时的观测一致性口径 }
+        detail_available: { type: boolean, description: 全量明细是否在保留期内 }
+        pinned: { type: boolean }
+        detail_pinned: { type: boolean }
+        scan_started_at: { $ref: '#/components/schemas/DateTime' }
+        scan_finished_at: { $ref: '#/components/schemas/DateTime' }
+        section_quality:
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/SectionQuality' }
+          description: 各栏目完整性
+        scope_fingerprint: { type: string, description: 范围指纹；不一致的报告显示"不完全可比" }
+        classification_version: { type: integer, description: 分类规则版本快照 }
+        totals:
+          type: object
+          properties:
+            file_count: { $ref: '#/components/schemas/DecimalString' }
+            logical_bytes: { $ref: '#/components/schemas/DecimalString' }
+            allocated_estimate_bytes: { $ref: '#/components/schemas/DecimalString' }
+        warnings:
+          type: array
+          items: { type: string }
+        created_at: { $ref: '#/components/schemas/DateTime' }
+    ReportDetail:
+      allOf:
+        - $ref: '#/components/schemas/ReportSummary'
+        - type: object
+          properties:
+            manifest:
+              type: object
+              description: 发布 manifest（schema_version、应用版本、profile/ruleset/scope fingerprints、文件大小与 SHA-256 清单）
+              properties:
+                schema_version: { type: integer }
+                app_version: { type: string }
+                profile_fingerprint: { type: string }
+                ruleset_fingerprint: { type: string }
+                scope_fingerprint: { type: string }
+                files:
+                  type: array
+                  items:
+                    type: object
+                    required: [path, size_bytes, sha256]
+                    properties:
+                      path: { type: string }
+                      size_bytes: { $ref: '#/components/schemas/DecimalString' }
+                      sha256: { type: string }
+            scope_snapshot: { $ref: '#/components/schemas/ProfileScope' }
+            source_identities:
+              type: array
+              description: 扫描时各源身份快照（identity_epoch 等）
+              items:
+                type: object
+                properties:
+                  source_id: { type: string, format: uuid }
+                  identity_epoch: { type: integer, format: int64 }
+                  availability: { $ref: '#/components/schemas/SourceAvailability' }
+            detail_path: { type: boolean, description: 报告全量明细文件是否仍存在 }
+            quota_snapshot:
+              type: array
+              items: { $ref: '#/components/schemas/ReportQuotaSnapshot' }
+              description: 报告当时的配额快照，不按今天的值重算
+    ComparisonResult:
+      type: object
+      required: [id, job_id, left_report_id, right_report_id, mode, comparable, state, summary, rows]
+      properties:
+        id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        left_report_id: { type: string, format: uuid }
+        right_report_id: { type: string, format: uuid }
+        mode: { type: string, enum: [aggregate, files] }
+        comparable: { type: boolean, description: scope_fingerprint 与 classification_version 是否一致 }
+        incompatibility_reasons:
+          type: array
+          items: { type: string }
+        state: { type: string, enum: [pending, succeeded, failed] }
+        summary:
+          type: object
+          additionalProperties: true
+        error:
+          type: [object, 'null']
+          additionalProperties: true
+        rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    QuerySpec:
+      type: object
+      description: |
+        统一查询规格（spec 17.4）。时间范围统一左闭右开 [from, to)，大小范围统一含边界。
+        CSV、表格与图表复用同一规范化 QuerySpec 与 query_hash；改变筛选后旧 cursor 返回 409。
+      properties:
+        source_ids:
+          type: array
+          items: { type: string, format: uuid }
+        directory_entry_id:
+          allOf:
+            - $ref: '#/components/schemas/DecimalString'
+          description: 目录子树根 entry_id
+        include_descendants: { type: boolean, default: true }
+        category_ids:
+          type: array
+          items: { $ref: '#/components/schemas/CategoryId' }
+        extensions:
+          type: array
+          items: { type: string, description: ASCII 小写比较，多段扩展名最长匹配优先 }
+        owner_uids:
+          type: array
+          items: { type: integer, format: int64 }
+        name_contains: { type: string, description: 字面量包含搜索，非正则 }
+        min_size_bytes:
+          allOf:
+            - $ref: '#/components/schemas/DecimalString'
+          description: 含边界
+        max_size_bytes:
+          allOf:
+            - $ref: '#/components/schemas/DecimalString'
+          description: 含边界
+        mtime_from:
+          allOf:
+            - $ref: '#/components/schemas/DateTime'
+          description: 含（左闭）
+        mtime_to:
+          allOf:
+            - $ref: '#/components/schemas/DateTime'
+          description: 不含（右开）
+        atime_from:
+          allOf:
+            - $ref: '#/components/schemas/DateTime'
+          description: 含（左闭）
+        atime_to:
+          allOf:
+            - $ref: '#/components/schemas/DateTime'
+          description: 不含（右开）
+        metric: { $ref: '#/components/schemas/Metric' }
+        sort: { $ref: '#/components/schemas/SortKey' }
+    FolderRow:
+      type: object
+      required: [entry_id, source_id, name, quality]
+      properties:
+        entry_id: { $ref: '#/components/schemas/DecimalString' }
+        source_id: { type: string, format: uuid }
+        parent_entry_id:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        name: { type: string, description: 展示名；超长在表格截断，详情可见完整 }
+        display_path: { type: string, description: 可展示相对路径；复制保持原始可展示文本 }
+        file_count: { $ref: '#/components/schemas/DecimalString' }
+        subdirectory_count: { $ref: '#/components/schemas/DecimalString' }
+        logical_bytes: { $ref: '#/components/schemas/DecimalString' }
+        allocated_estimate_bytes: { $ref: '#/components/schemas/DecimalString' }
+        share_of_scope: { type: [number, 'null'], description: 占比 0..1；分母不可得时 null }
+        quality: { $ref: '#/components/schemas/SectionQuality' }
+        delta_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+          description: 与上一份可比报告的变化量；不可比时 null
+    OwnerRow:
+      type: object
+      required: [uid, file_count, logical_bytes, source_breakdown]
+      properties:
+        uid:
+          type: [integer, 'null']
+          format: int64
+          description: 扫描时的文件归属 uid，不表示上传者/修改者；未知 UID 为 null 但仍完整统计
+        display_name:
+          type: [string, 'null']
+          description: 身份映射显示名；未知 UID 为 null 但仍完整统计
+        identity_source:
+          type: string
+          enum: [explicit_import, manual, numeric_fallback]
+          description: 映射优先级：显式导入 > 手动映射 > uid:<数字>
+        file_count: { $ref: '#/components/schemas/DecimalString' }
+        logical_bytes: { $ref: '#/components/schemas/DecimalString' }
+        allocated_estimate_bytes: { $ref: '#/components/schemas/DecimalString' }
+        category_breakdown:
+          description: 各 category_id 的文件数，值为十进制字符串
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/DecimalString' }
+        source_breakdown:
+          description: 当前 UID 在各数据源中的分布
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [source_id, file_count, logical_bytes]
+            properties:
+              source_id: { type: string, format: uuid }
+              file_count: { $ref: '#/components/schemas/DecimalString' }
+              logical_bytes:
+                anyOf:
+                  - $ref: '#/components/schemas/DecimalString'
+                  - type: 'null'
+        quota:
+          anyOf:
+            - $ref: '#/components/schemas/ReportQuotaSnapshot'
+            - type: 'null'
+          description: 报告当时的配额/预算快照；过期显示 stale
+    CategoryRow:
+      type: object
+      required: [category_id, file_count, logical_bytes, source_breakdown]
+      properties:
+        category_id: { $ref: '#/components/schemas/CategoryId' }
+        file_count: { $ref: '#/components/schemas/DecimalString' }
+        logical_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        allocated_estimate_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        share_of_scope: { type: [number, 'null'] }
+        source_breakdown:
+          description: 当前 category_id 在各数据源中的分布
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [source_id, file_count, logical_bytes, allocated_estimate_bytes]
+            properties:
+              source_id: { type: string, format: uuid }
+              file_count: { $ref: '#/components/schemas/DecimalString' }
+              logical_bytes:
+                anyOf:
+                  - $ref: '#/components/schemas/DecimalString'
+                  - type: 'null'
+              allocated_estimate_bytes:
+                anyOf:
+                  - $ref: '#/components/schemas/DecimalString'
+                  - type: 'null'
+    FileRow:
+      type: object
+      required: [entry_id, source_id, entry_kind, display_name]
+      properties:
+        entry_id: { $ref: '#/components/schemas/DecimalString' }
+        source_id: { type: string, format: uuid }
+        parent_entry_id:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        display_name: { type: string }
+        display_path: { type: string, description: 仅供展示；服务端操作只认 entry_id }
+        entry_kind: { type: string, enum: [file, directory, symlink, other] }
+        device_id: { $ref: '#/components/schemas/DecimalString' }
+        inode_id: { $ref: '#/components/schemas/DecimalString' }
+        nlink: { type: integer, format: int64, description: 硬链接数；nlink>1 不等于多份内容 }
+        uid: { type: integer, format: int64 }
+        gid: { type: integer, format: int64 }
+        mode: { type: integer }
+        size_bytes: { $ref: '#/components/schemas/DecimalString' }
+        allocated_estimate_bytes: { $ref: '#/components/schemas/DecimalString' }
+        mtime: { $ref: '#/components/schemas/FileTime' }
+        atime: { $ref: '#/components/schemas/FileTime' }
+        ctime: { $ref: '#/components/schemas/FileTime' }
+        birthtime:
+          anyOf:
+            - $ref: '#/components/schemas/FileTime'
+            - type: 'null'
+        category_id: { $ref: '#/components/schemas/CategoryId' }
+        extension: { type: [string, 'null'] }
+        scan_error: { type: [string, 'null'] }
+        observation_time: { $ref: '#/components/schemas/DateTime' }
+    RankingRow:
+      allOf:
+        - $ref: '#/components/schemas/FileRow'
+        - type: object
+          required: [rank]
+          properties:
+            rank: { type: integer, minimum: 1 }
+    DuplicateGroup:
+      type: object
+      required: [group_id, member_count, listed_member_count, complete, size_bytes, verification]
+      properties:
+        group_id: { type: string }
+        member_count: { type: integer, format: int64 }
+        listed_member_count: { type: integer, format: int64, description: 受 max_listed_files 限制的列出数 }
+        complete: { type: boolean, description: 组内成员是否完整列出；false 为截断组 }
+        size_bytes: { $ref: '#/components/schemas/DecimalString', description: 单文件大小 }
+        logical_total_bytes: { $ref: '#/components/schemas/DecimalString' }
+        reclaimable_bytes:
+          allOf:
+            - $ref: '#/components/schemas/DecimalString'
+          description: 逻辑冗余估算 (n-1)*size；硬链接多路径不算多份内容
+        verification:
+          type: string
+          enum: [hash_complete, hash_incomplete, size_only]
+          description: hash_incomplete 时不得依据旧哈希删除
+        hash: { type: [string, 'null'], description: 内容哈希（完整时） }
+        sample_members:
+          type: array
+          items: { $ref: '#/components/schemas/DuplicateMember' }
+    DuplicateMember:
+      type: object
+      required: [entry_id, source_id, display_path]
+      properties:
+        entry_id: { $ref: '#/components/schemas/DecimalString' }
+        source_id: { type: string, format: uuid }
+        display_path: { type: string }
+        size_bytes: { $ref: '#/components/schemas/DecimalString' }
+        mtime: { $ref: '#/components/schemas/FileTime' }
+        nlink: { type: integer, format: int64 }
+        protected: { type: boolean, description: 保护目录/备份仓库等，清理时优先保留 }
+        quarantined_since:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+          description: 之后已移入隔离区的叠加状态，不修改历史数值
+    ExportRecord:
+      type: object
+      required: [id, report_id, section, format, query_hash, state]
+      properties:
+        id: { type: string, format: uuid }
+        report_id:
+          anyOf:
+            - { type: string, format: uuid }
+            - type: 'null'
+        job_id: { type: string, format: uuid }
+        section: { type: string }
+        format: { type: string, enum: [csv, json, html, zip] }
+        query_hash: { type: string, description: 规范化 QuerySpec 的哈希；CSV 与页面共用 }
+        state: { type: string, enum: [pending, running, ready, failed, expired] }
+        size_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        expires_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+        lease_count: { type: integer, description: 使用租约数；租约未释放时垃圾清理不得删除 }
+        manifest:
+          type: [object, 'null']
+          description: 导出清单：筛选、截断、数据口径和时区说明
+          additionalProperties: true
+
+    # ------------------------------------------------------------ cleanup
+    CleanupPlanRequest:
+      type: object
+      description: 只提交 entry IDs，不接收可执行路径；后端校验条目同组且每组至少保留一份。
+      required: [report_id, groups]
+      properties:
+        report_id: { type: string, format: uuid }
+        groups:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [group_id, keep_entry_ids, target_entry_ids]
+            properties:
+              group_id: { type: string }
+              keep_entry_ids:
+                type: array
+                minItems: 1
+                items: { $ref: '#/components/schemas/DecimalString' }
+                description: 每组至少保留一份
+              target_entry_ids:
+                type: array
+                minItems: 1
+                items: { $ref: '#/components/schemas/DecimalString' }
+    CleanupPlan:
+      type: object
+      required: [id, report_id, state, action, selected_count, logical_total_bytes, validation_version, expires_at, confirmation_text]
+      properties:
+        id: { type: string, format: uuid, description: 不可变计划 ID；服务端持久记录/签名防篡改 }
+        report_id: { type: string, format: uuid }
+        state: { type: string, enum: [preview, executing, completed, expired, invalidated] }
+        action: { type: string, enum: [quarantine] }
+        selected_count: { type: integer, format: int64 }
+        logical_total_bytes: { $ref: '#/components/schemas/DecimalString' }
+        blocked_entries:
+          type: array
+          description: 无法处理条目及原因（保护目录、硬链接、符号链接、范围外、分层占位等）
+          items:
+            type: object
+            required: [entry_id, reason]
+            properties:
+              entry_id: { $ref: '#/components/schemas/DecimalString' }
+              reason:
+                type: string
+                enum: [protected_file, hardlink_not_allowed, symlink, outside_scope, tiered_placeholder, active_file, not_found]
+        kept_entries:
+          type: array
+          items: { $ref: '#/components/schemas/DecimalString' }
+        risks:
+          type: array
+          items: { type: string }
+          description: 风险说明（含"隔离不是释放空间"、不可逆提示等）
+        validation_version: { type: integer, format: int64, description: 计划校验版本；身份/内容变化必须重新校验 }
+        confirmation_text: { type: string, description: 执行时客户端必须回显提交的确认文本 }
+        expires_at: { $ref: '#/components/schemas/DateTime', description: 5 分钟到期；过期返回 PLAN_EXPIRED(410) }
+        created_at: { $ref: '#/components/schemas/DateTime' }
+    CleanupItem:
+      type: object
+      required: [id, entry_id, state, journal_seq]
+      properties:
+        id: { type: string, format: uuid }
+        entry_id: { $ref: '#/components/schemas/DecimalString' }
+        original_display_path: { type: string }
+        quarantine_display_path:
+          type: [string, 'null']
+          description: .nas-analyzer-quarantine/<action_id>/<item_id>，仅供展示
+        size_bytes: { $ref: '#/components/schemas/DecimalString' }
+        state: { $ref: '#/components/schemas/CleanupItemState' }
+        journal_seq: { type: integer, format: int64, description: 动作日志序号；移动前写入并 fsync }
+        error: { type: [string, 'null'] }
+    CleanupAction:
+      type: object
+      required: [id, plan_id, job_id, state, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        plan_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        actor_id: { type: string, format: uuid }
+        state: { type: string, enum: [running, completed, partial, failed] }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CleanupItem' }
+        created_at: { $ref: '#/components/schemas/DateTime' }
+        finished_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+    QuarantineItem:
+      type: object
+      required: [id, action_id, source_id, state, quarantined_at, space_released]
+      properties:
+        id: { type: string, format: uuid }
+        action_id: { type: string, format: uuid }
+        plan_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        original_display_path: { type: string }
+        size_bytes: { $ref: '#/components/schemas/DecimalString' }
+        state: { $ref: '#/components/schemas/CleanupItemState' }
+        risks:
+          type: array
+          items: { type: string }
+        surviving_copies:
+          type: [integer, 'null']
+          description: 仍存在的保留副本数；purge 前重新核验，失效则停止
+        space_released:
+          type: boolean
+          enum: [false]
+          description: 恒为 false——隔离仍占用同一文件系统空间，尚未释放磁盘空间
+        quarantined_at: { $ref: '#/components/schemas/DateTime' }
+
+    # ------------------------------------------------------------ settings
+    CategoryRuleset:
+      type: object
+      required: [id, version, rules, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        version: { type: integer, description: 单调递增；历史不可变，报告保存版本快照 }
+        rules:
+          type: object
+          description: |
+            分类 ID → 扩展名映射；键固定为 9 个分类 ID。
+            多段扩展名最长匹配优先（tar.gz 优先于 gz）；ASCII 小写比较；无扩展名/点文件归 other。
+          required: [audio, disk_images, documents, executables, pictures, videos, web_and_code, archives, other]
+          properties:
+            audio: { $ref: '#/components/schemas/ExtensionList' }
+            disk_images: { $ref: '#/components/schemas/ExtensionList' }
+            documents: { $ref: '#/components/schemas/ExtensionList' }
+            executables: { $ref: '#/components/schemas/ExtensionList' }
+            pictures: { $ref: '#/components/schemas/ExtensionList' }
+            videos: { $ref: '#/components/schemas/ExtensionList' }
+            web_and_code: { $ref: '#/components/schemas/ExtensionList' }
+            archives: { $ref: '#/components/schemas/ExtensionList' }
+            other: { $ref: '#/components/schemas/ExtensionList' }
+        created_at: { $ref: '#/components/schemas/DateTime' }
+    ExtensionList:
+      type: array
+      items:
+        type: string
+        pattern: '^[a-z0-9_+-]+(\.[a-z0-9_+-]+)*$'
+        description: 禁止斜杠/反斜杠/控制字符/空白；一个扩展名只能属于一个类别
+    CategoryRulesetInput:
+      type: object
+      required: [rules]
+      properties:
+        rules:
+          type: object
+          required: [audio, disk_images, documents, executables, pictures, videos, web_and_code, archives, other]
+          properties:
+            audio: { $ref: '#/components/schemas/ExtensionList' }
+            disk_images: { $ref: '#/components/schemas/ExtensionList' }
+            documents: { $ref: '#/components/schemas/ExtensionList' }
+            executables: { $ref: '#/components/schemas/ExtensionList' }
+            pictures: { $ref: '#/components/schemas/ExtensionList' }
+            videos: { $ref: '#/components/schemas/ExtensionList' }
+            web_and_code: { $ref: '#/components/schemas/ExtensionList' }
+            archives: { $ref: '#/components/schemas/ExtensionList' }
+            other: { $ref: '#/components/schemas/ExtensionList' }
+    NotificationConfig:
+      type: object
+      required: [enabled, smtp_host, smtp_port, tls_mode, from_address]
+      properties:
+        enabled: { type: boolean }
+        smtp_host: { type: string }
+        smtp_port: { type: integer, minimum: 1, maximum: 65535 }
+        tls_mode:
+          type: string
+          enum: [starttls, tls, none]
+          description: 默认要求 TLS 并校验证书；none 仅明确内网调试模式并警告
+        username: { type: [string, 'null'] }
+        password_set: { type: boolean, description: 是否已设置密钥；密钥回显始终打码，不返回明文 }
+        from_address: { type: string, format: email }
+        default_recipients:
+          type: array
+          items: { type: string, format: email }
+        subject_prefix: { type: string, default: '[NAS Analyzer]' }
+        public_base_url: { type: [string, 'null'] }
+    NotificationConfigInput:
+      allOf:
+        - $ref: '#/components/schemas/NotificationConfig'
+        - type: object
+          properties:
+            password:
+              type: [string, 'null']
+              format: password
+              description: 明文写入（仅请求）；留空/null 表示不修改
+    StorageSettings:
+      type: object
+      required: [data_budget_bytes, used_bytes]
+      properties:
+        data_budget_bytes: { $ref: '#/components/schemas/DecimalString', description: 应用数据预算，默认 20 GiB；达到预算先清理缓存与过期导出 }
+        used_bytes: { $ref: '#/components/schemas/DecimalString' }
+        deployment_max_budget_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+          description: 部署边界上限；UI 不得扩大
+    StorageSettingsInput:
+      type: object
+      required: [data_budget_bytes]
+      properties:
+        data_budget_bytes: { $ref: '#/components/schemas/DecimalString' }
+    RetentionSettings:
+      type: object
+      required: [default_report_keep_count, default_detail_keep_count, quarantine_auto_purge]
+      properties:
+        default_report_keep_count: { type: integer, default: 30, minimum: 1 }
+        default_detail_keep_count: { type: integer, default: 3, minimum: 0 }
+        quarantine_auto_purge:
+          type: object
+          required: [enabled]
+          properties:
+            enabled: { type: boolean, default: false, description: 默认关闭；启用必须明示永久删除不可撤销 }
+            min_keep_days: { type: integer, minimum: 7, default: 30, description: 最短保留 7 天 }
+    RetentionSettingsInput:
+      allOf:
+        - $ref: '#/components/schemas/RetentionSettings'
+
+    # ------------------------------------------------------------ metadata import
+    IdentityMapping:
+      type: object
+      additionalProperties: false
+      required: [namespace, uid, gid, display_name, observed_at]
+      properties:
+        namespace: { type: string, description: 如 posix-container；userns/remap 时统计的是容器可见 UID }
+        uid: { type: integer, format: int64 }
+        gid: { type: [integer, 'null'], format: int64 }
+        display_name: { type: string }
+        observed_at: { $ref: '#/components/schemas/DateTime' }
+    QuotaRecord:
+      type: object
+      additionalProperties: false
+      required: [principal, scope, metric, origin, limit, used_bytes, observed_at, expires_at, provider_label]
+      properties:
+        principal:
+          type: object
+          required: [namespace, uid]
+          properties:
+            namespace: { type: string }
+            uid: { type: integer, format: int64 }
+        scope:
+          type: object
+          required: [kind, id]
+          properties:
+            kind: { type: string, enum: [source, volume] }
+            id: { type: string, format: uuid }
+        metric: { type: string, enum: [logical_bytes, allocated_bytes, filesystem_quota_bytes] }
+        origin:
+          type: string
+          enum: [system_imported, advisory]
+          description: advisory 是分析预算，不限制写入，不得显示成系统配额
+        limit:
+          type: object
+          additionalProperties: false
+          required: [state, bytes]
+          description: 没有配额值不是无限制；unlimited 是独立状态
+          properties:
+            state: { type: string, enum: [known, unlimited, unknown] }
+            bytes:
+              anyOf:
+                - $ref: '#/components/schemas/DecimalString'
+                - type: 'null'
+          allOf:
+            - if:
+                properties:
+                  state: { const: known }
+              then:
+                properties:
+                  bytes: { $ref: '#/components/schemas/DecimalString' }
+              else:
+                properties:
+                  bytes: { type: 'null' }
+        used_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+          description: 仅分子分母同作用域且来源可解释时才展示使用率
+        observed_at: { $ref: '#/components/schemas/DateTime' }
+        expires_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+          description: 过期后显示 stale
+        provider_label: { type: string }
+    ReportQuotaSnapshot:
+      type: object
+      additionalProperties: false
+      description: 报告发布时保存的配额快照；包含过期标记，不是当前系统配额查询
+      required: [principal, scope, metric, origin, limit, used_bytes, observed_at, expires_at, provider_label, stale]
+      properties:
+        principal:
+          type: object
+          additionalProperties: false
+          required: [namespace, uid]
+          properties:
+            namespace: { type: string }
+            uid: { type: integer, format: int64 }
+        scope:
+          type: object
+          additionalProperties: false
+          required: [kind, id]
+          properties:
+            kind: { type: string, enum: [source, volume] }
+            id: { type: string, format: uuid }
+        metric: { type: string, enum: [logical_bytes, allocated_bytes, filesystem_quota_bytes] }
+        origin:
+          type: string
+          enum: [system_imported, advisory]
+        limit:
+          type: object
+          additionalProperties: false
+          required: [state, bytes]
+          properties:
+            state: { type: string, enum: [known, unlimited, unknown] }
+            bytes:
+              anyOf:
+                - $ref: '#/components/schemas/DecimalString'
+                - type: 'null'
+        used_bytes:
+          anyOf:
+            - $ref: '#/components/schemas/DecimalString'
+            - type: 'null'
+        observed_at: { $ref: '#/components/schemas/DateTime' }
+        expires_at:
+          anyOf:
+            - $ref: '#/components/schemas/DateTime'
+            - type: 'null'
+        provider_label: { type: [string, 'null'] }
+        stale: { type: boolean, description: 快照记录在报告发布时是否已过期 }
+    MetadataImportPayload:
+      type: object
+      additionalProperties: false
+      description: 与 contracts/metadata-import.schema.json 对齐（schema_version=1）
+      required: [schema_version, generated_at, provider_label, identities, source_links, quotas]
+      properties:
+        schema_version: { type: integer, enum: [1] }
+        generated_at: { $ref: '#/components/schemas/DateTime' }
+        provider_label: { type: string }
+        identities:
+          type: array
+          items: { $ref: '#/components/schemas/IdentityMapping' }
+        source_links:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [source_id, volume_id, provider_volume_key]
+            properties:
+              source_id: { type: string, format: uuid }
+              volume_id: { type: string, format: uuid }
+              provider_volume_key: { type: [string, 'null'] }
+        quotas:
+          type: array
+          items: { $ref: '#/components/schemas/QuotaRecord' }
+    ImportPreview:
+      type: object
+      required: [preview_id, digest, valid, schema_errors, scope_warnings, counts, diff_summary, expires_at]
+      properties:
+        preview_id: { type: string, format: uuid }
+        digest: { type: string, description: 内容 SHA-256 hex；apply 时必须回传 }
+        valid: { type: boolean }
+        schema_errors:
+          type: array
+          items: { type: string }
+        scope_warnings:
+          type: array
+          items: { type: string, description: 作用域/源匹配问题（如引用未登记 source_id） }
+        counts:
+          type: object
+          required: [identities, source_links, quotas]
+          properties:
+            identities: { type: integer }
+            source_links: { type: integer }
+            quotas: { type: integer }
+        diff_summary:
+          type: object
+          required: [identities_added, identities_updated, quotas_added, quotas_updated]
+          properties:
+            identities_added: { type: integer, minimum: 0 }
+            identities_updated: { type: integer, minimum: 0 }
+            quotas_added: { type: integer, minimum: 0 }
+            quotas_updated: { type: integer, minimum: 0 }
+        expires_at: { $ref: '#/components/schemas/DateTime' }
+
+    # ------------------------------------------------------------ diagnostics / audit
+    DiagnosticInfo:
+      type: object
+      required: [app_version, schema_migrations, build, runtime, data_dir, scan_queue, sources]
+      properties:
+        app_version: { type: string }
+        sqlite_version: { type: string }
+        schema_migrations:
+          type: object
+          properties:
+            control: { type: integer }
+        build:
+          type: object
+          properties:
+            profile: { type: string }
+            target: { type: string }
+            commit: { type: [string, 'null'] }
+        runtime:
+          type: object
+          description: 架构、运行身份、内核能力、只读边界、进程资源
+          properties:
+            arch: { type: string }
+            os: { type: string }
+            uid: { type: integer }
+            gid: { type: integer }
+            read_only_boundary: { type: boolean, description: 是否处于严格只读分析模式 }
+            capabilities:
+              type: array
+              items: { type: string }
+            memory_rss_bytes: { $ref: '#/components/schemas/DecimalString' }
+            uptime_sec: { type: integer, format: int64 }
+        data_dir:
+          type: object
+          properties:
+            free_bytes: { $ref: '#/components/schemas/DecimalString' }
+            used_bytes: { $ref: '#/components/schemas/DecimalString' }
+            budget_bytes: { $ref: '#/components/schemas/DecimalString' }
+        scan_queue:
+          type: object
+          properties:
+            running: { type: integer }
+            queued: { type: integer }
+            max_queue: { type: integer, default: 20 }
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              source_id: { type: string, format: uuid }
+              name: { type: string }
+              availability: { $ref: '#/components/schemas/SourceAvailability' }
+        note: { type: string, description: 诊断包导出默认脱敏用户名、宿主路径和密钥，不自动上传任何数据 }
+    AuditEvent:
+      type: object
+      required: [id, actor, action, resource, result, request_id, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        actor:
+          type: object
+          properties:
+            admin_id: { type: [string, 'null'], format: uuid }
+            username: { type: [string, 'null'] }
+        action: { type: string, description: 如 profile.update、cleanup.execute、notification.test }
+        resource:
+          type: object
+          properties:
+            kind: { type: string }
+            id: { type: [string, 'null'] }
+        result: { type: string, enum: [success, denied, failed] }
+        request_id: { type: string, format: uuid }
+        created_at: { $ref: '#/components/schemas/DateTime' }
+        redacted_detail:
+          type: object
+          additionalProperties: true
+          description: 脱敏详情；密钥、密码、token 与不必要时文件路径永不写入
+
+security:
+  - cookieAuth: []

@@ -1,0 +1,41 @@
+*.zip
+*.rar
+*.back*
+*.bak*
+*备份*
+*副本*
+* copy*
+
+.DS_Store
+node_modules/
+/dist/
+/coverage/
+/.history/
+# local env files
+.env.local
+.env.*.local
+.__mf__temp
+.mf-dev-proxy.local.json
+.nas-storage-analyzer-e2e.*
+.nas-storage-analyzer-real-api.*
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+/logs/
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw*
+
+target/
+target-linux/
+
+# Generated M8 dependency audit artifacts
+/artifacts/dependencies/

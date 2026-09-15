@@ -1,0 +1,9 @@
+ALTER TABLE volume_samples_daily ADD COLUMN total_min TEXT;
+ALTER TABLE volume_samples_daily ADD COLUMN total_max TEXT;
+ALTER TABLE volume_samples_daily ADD COLUMN total_last TEXT;
+ALTER TABLE volume_samples_daily ADD COLUMN free_min TEXT;
+ALTER TABLE volume_samples_daily ADD COLUMN free_max TEXT;
+ALTER TABLE volume_samples_daily ADD COLUMN free_last TEXT;
+ALTER TABLE volume_samples_daily ADD COLUMN available_min TEXT;
+ALTER TABLE volume_samples_daily ADD COLUMN available_max TEXT;
+ALTER TABLE volume_samples_daily ADD COLUMN available_last TEXT;

@@ -1,0 +1,57 @@
+[workspace]
+resolver = "3"
+members = ["crates/nas-analyzer", "crates/fssecure"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://example.invalid/nas-storage-analyzer"
+
+[workspace.dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-core = "0.3"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace", "catch-panic", "set-header"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup", "blob", "serialize"] }
+rustix = { version = "1", features = ["fs", "process", "thread", "param"] }
+sha2 = "0.10"
+argon2 = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+jiff = { version = "0.2", features = ["serde"] }
+cron = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
+chrono-tz = "0.10"
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "rustls-tls", "smtp-transport", "builder"] }
+rand = "0.9"
+hex = "0.4"
+hmac = "0.12"
+base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+globset = "0.4"
+percent-encoding = "2"
+memchr = "2"
+tempfile = "3"
+jsonschema = "0.30"
+ipnet = "2"
+num-traits = "0.2"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+flate2 = "1"
+unicode-width = "0.2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[profile.release]
+overflow-checks = true
+debug-assertions = false
+codegen-units = 1
+lto = "thin"

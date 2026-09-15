@@ -1,0 +1,31 @@
+//! NAS Storage Analyzer library crate. Integration tests reuse these modules;
+//! `main.rs` only does CLI dispatch and process startup.
+
+pub mod audit;
+pub mod auth;
+pub mod backup;
+pub mod category;
+pub mod cleanup;
+pub mod cli;
+pub mod config;
+pub mod diagnostics;
+pub mod duplicates;
+pub mod error;
+pub mod export;
+pub mod fixture;
+pub mod httpapi;
+pub mod jobs;
+pub mod metadata_import;
+pub mod notify;
+pub mod profile;
+pub mod report;
+mod resource;
+pub mod retention;
+pub mod runtime;
+pub mod sampling;
+pub mod scanner;
+pub mod scheduler;
+pub mod source;
+pub mod store;
+pub mod volume;
+pub mod worker;

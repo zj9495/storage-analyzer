@@ -1,0 +1,64 @@
+# Deployment template. Copy deploy/.env.example to deploy/.env and replace
+# every /replace/... path before starting the service.
+services:
+  analyzer:
+    image: ${ANALYZER_IMAGE:-nas-storage-analyzer:local}
+    container_name: nas-storage-analyzer
+    command: ["serve", "--config", "/config/config.yaml"]
+    user: "${APP_UID:?Set APP_UID}:${APP_GID:?Set APP_GID}"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${NAS_BIND_IP:-127.0.0.1}:${APP_PORT:-3010}:8080"
+    environment:
+      TZ: ${APP_TIMEZONE:-UTC}
+      APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+    volumes:
+      - type: bind
+        source: ${APP_DATA_PATH:?Set APP_DATA_PATH}
+        target: /data
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${APP_CONFIG_PATH:?Set APP_CONFIG_PATH}
+        target: /config/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SOURCE_PATH:?Set SOURCE_PATH}
+        target: /sources/main
+        read_only: true
+        bind:
+          create_host_path: false
+    # Add explicitly authorized supplementary groups when needed.
+    # group_add:
+    #   - "100"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    # Overall container hard limit; includes the Rust API and scan worker.
+    mem_limit: ${APP_MEMORY_LIMIT:-1024m}
+    cpus: ${APP_CPUS:-2.0}
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/nas-analyzer", "healthcheck", "--url", "http://127.0.0.1:8080/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
