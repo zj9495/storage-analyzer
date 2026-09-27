@@ -1551,7 +1551,6 @@ mod tests {
             }],
             security: SecurityConfig {
                 allow_write_operations: false,
-                setup_token_minutes: 30,
                 session_idle_minutes: 30,
                 session_absolute_hours: 24,
                 reauth_minutes: 5,
@@ -1859,7 +1858,8 @@ mod tests {
         let reservation = state
             .writer
             .call_blocking(move |conn| {
-                let admin = auth::create_admin(conn, "admin", "a sufficiently long password")?;
+                let admin =
+                    auth::create_admin(conn, "cleanup-admin", "a sufficiently long password")?;
                 let now = auth::now_rfc3339();
                 conn.execute(
                     "INSERT INTO sources
@@ -1992,7 +1992,8 @@ mod tests {
         let reservation = state
             .writer
             .call_blocking(move |conn| {
-                let admin = auth::create_admin(conn, "admin", "a sufficiently long password")?;
+                let admin =
+                    auth::create_admin(conn, "cleanup-admin", "a sufficiently long password")?;
                 let now = auth::now_rfc3339();
                 conn.execute(
                     "INSERT INTO sources

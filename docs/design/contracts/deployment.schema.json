@@ -118,7 +118,6 @@
       "additionalProperties": false,
       "required": [
         "allow_write_operations",
-        "setup_token_minutes",
         "session_idle_minutes",
         "session_absolute_hours",
         "reauth_minutes"
@@ -126,11 +125,6 @@
       "properties": {
         "allow_write_operations": {
           "type": "boolean"
-        },
-        "setup_token_minutes": {
-          "type": "integer",
-          "minimum": 5,
-          "maximum": 120
         },
         "session_idle_minutes": {
           "type": "integer",

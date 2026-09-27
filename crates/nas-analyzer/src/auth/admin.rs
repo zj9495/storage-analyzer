@@ -11,6 +11,7 @@ pub struct AdminUser {
     pub id: String,
     pub username: String,
     pub enabled: bool,
+    pub must_change_password: bool,
     pub created_at: String,
 }
 
@@ -31,18 +32,18 @@ pub(crate) fn validate_username(username: &str) -> AppResult<()> {
 }
 
 pub(crate) fn validate_password(password: &str) -> AppResult<()> {
-    if password.chars().count() >= 12 {
+    if password.chars().count() >= 8 {
         Ok(())
     } else {
         Err(AppError::new(
             ErrorCode::ValidationFailed,
-            "密码长度至少为 12 个字符",
+            "密码长度至少为 8 个字符",
         ))
     }
 }
 
-/// Insert a new admin row. Shared by `create_admin` and `complete_setup`;
-/// takes `&Connection` so it can run inside an existing transaction.
+/// Insert a new administrator row; takes `&Connection` so it can run inside
+/// an existing transaction.
 pub(crate) fn insert_admin(
     conn: &Connection,
     username: &str,
@@ -55,12 +56,19 @@ pub(crate) fn insert_admin(
         id: uuid::Uuid::new_v4().to_string(),
         username: username.to_string(),
         enabled: true,
+        must_change_password: false,
         created_at: now_rfc3339(),
     };
     conn.execute(
-        "INSERT INTO admin_users(id, username, password_hash, password_params_json, enabled, created_at) \
-         VALUES (?1, ?2, ?3, ?4, 1, ?5)",
-        params![admin.id, admin.username, encoded, params_json, admin.created_at],
+        "INSERT INTO admin_users(id, username, password_hash, password_params_json, enabled, \
+         must_change_password, created_at) VALUES (?1, ?2, ?3, ?4, 1, 0, ?5)",
+        params![
+            admin.id,
+            admin.username,
+            encoded,
+            params_json,
+            admin.created_at
+        ],
     )
     .map_err(|e| {
         if let rusqlite::Error::SqliteFailure(err, _) = &e
@@ -73,13 +81,43 @@ pub(crate) fn insert_admin(
     Ok(admin)
 }
 
+/// Insert the fixed initial account used by a brand-new data directory.
+/// The short password is allowed only here; every user-supplied password goes
+/// through [`validate_password`].
+pub(crate) fn insert_default_admin(conn: &Connection) -> AppResult<AdminUser> {
+    let (encoded, params_json) = hash_password("admin")?;
+    let admin = AdminUser {
+        id: uuid::Uuid::new_v4().to_string(),
+        username: "admin".to_string(),
+        enabled: true,
+        must_change_password: true,
+        created_at: now_rfc3339(),
+    };
+    conn.execute(
+        "INSERT INTO admin_users(id, username, password_hash, password_params_json, enabled, \
+         must_change_password, created_at) VALUES (?1, ?2, ?3, ?4, 1, 1, ?5)",
+        params![
+            admin.id,
+            admin.username,
+            encoded,
+            params_json,
+            admin.created_at
+        ],
+    )
+    .map_err(|e| internal(format!("创建默认管理员失败: {e}")))?;
+    Ok(admin)
+}
+
 pub fn create_admin(conn: &Connection, username: &str, password: &str) -> AppResult<AdminUser> {
     insert_admin(conn, username, password)
 }
 
 pub fn list_admins(conn: &Connection) -> AppResult<Vec<AdminUser>> {
     let mut stmt = conn
-        .prepare("SELECT id, username, enabled, created_at FROM admin_users ORDER BY created_at")
+        .prepare(
+            "SELECT id, username, enabled, must_change_password, created_at \
+             FROM admin_users ORDER BY created_at",
+        )
         .map_err(|e| internal(format!("查询管理员列表失败: {e}")))?;
     let rows = stmt
         .query_map([], |r| {
@@ -87,7 +125,8 @@ pub fn list_admins(conn: &Connection) -> AppResult<Vec<AdminUser>> {
                 id: r.get(0)?,
                 username: r.get(1)?,
                 enabled: r.get::<_, i64>(2)? != 0,
-                created_at: r.get(3)?,
+                must_change_password: r.get::<_, i64>(3)? != 0,
+                created_at: r.get(4)?,
             })
         })
         .map_err(|e| internal(format!("查询管理员列表失败: {e}")))?;
@@ -97,14 +136,16 @@ pub fn list_admins(conn: &Connection) -> AppResult<Vec<AdminUser>> {
 
 fn find_admin(conn: &Connection, username: &str) -> AppResult<Option<AdminUser>> {
     conn.query_row(
-        "SELECT id, username, enabled, created_at FROM admin_users WHERE username = ?1",
+        "SELECT id, username, enabled, must_change_password, created_at FROM admin_users \
+         WHERE username = ?1",
         [username],
         |r| {
             Ok(AdminUser {
                 id: r.get(0)?,
                 username: r.get(1)?,
                 enabled: r.get::<_, i64>(2)? != 0,
-                created_at: r.get(3)?,
+                must_change_password: r.get::<_, i64>(3)? != 0,
+                created_at: r.get(4)?,
             })
         },
     )
@@ -174,7 +215,8 @@ pub fn reset_password(conn: &mut Connection, username: &str, new_password: &str)
         .transaction()
         .map_err(|e| internal(format!("开启事务失败: {e}")))?;
     tx.execute(
-        "UPDATE admin_users SET password_hash = ?1, password_params_json = ?2 WHERE id = ?3",
+        "UPDATE admin_users SET password_hash = ?1, password_params_json = ?2, \
+         must_change_password = 0 WHERE id = ?3",
         params![encoded, params_json, admin.id],
     )
     .map_err(|e| internal(format!("重置密码失败: {e}")))?;
@@ -182,6 +224,18 @@ pub fn reset_password(conn: &mut Connection, username: &str, new_password: &str)
         .map_err(|e| internal(format!("清除会话失败: {e}")))?;
     tx.commit()
         .map_err(|e| internal(format!("提交事务失败: {e}")))
+}
+
+/// Read whether an authenticated administrator must choose a new password.
+pub fn password_change_required(conn: &Connection, user_id: &str) -> AppResult<bool> {
+    conn.query_row(
+        "SELECT must_change_password FROM admin_users WHERE id = ?1",
+        [user_id],
+        |r| Ok(r.get::<_, i64>(0)? != 0),
+    )
+    .optional()
+    .map_err(|e| internal(format!("查询管理员密码状态失败: {e}")))?
+    .ok_or_else(|| AppError::new(ErrorCode::Unauthorized, "会话所属管理员已不存在"))
 }
 
 /// Verify login credentials. Returns the admin on success; `None` when the
@@ -194,7 +248,8 @@ pub fn verify_admin_password(
 ) -> AppResult<Option<AdminUser>> {
     let row: Option<(AdminUser, String)> = conn
         .query_row(
-            "SELECT id, username, enabled, created_at, password_hash FROM admin_users \
+            "SELECT id, username, enabled, must_change_password, created_at, password_hash \
+             FROM admin_users \
              WHERE username = ?1",
             [username],
             |r| {
@@ -203,9 +258,10 @@ pub fn verify_admin_password(
                         id: r.get(0)?,
                         username: r.get(1)?,
                         enabled: r.get::<_, i64>(2)? != 0,
-                        created_at: r.get(3)?,
+                        must_change_password: r.get::<_, i64>(3)? != 0,
+                        created_at: r.get(4)?,
                     },
-                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             },
         )
@@ -242,10 +298,12 @@ mod tests {
         let conn = test_conn();
         let a = create_admin(&conn, "admin_1", PW).unwrap();
         assert!(a.enabled);
+        assert!(!a.must_change_password);
         create_admin(&conn, "ops.user-2", PW).unwrap();
         let all = list_admins(&conn).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].username, "admin_1");
+        assert!(!all[0].must_change_password);
     }
 
     #[test]
@@ -259,6 +317,17 @@ mod tests {
         assert_eq!(e.code, ErrorCode::ValidationFailed);
         let e = create_admin(&conn, "ok_user", "short").unwrap_err();
         assert_eq!(e.code, ErrorCode::ValidationFailed);
+    }
+
+    #[test]
+    fn user_supplied_passwords_require_eight_characters() {
+        let mut conn = test_conn();
+        let e = create_admin(&conn, "admin", "1234567").unwrap_err();
+        assert_eq!(e.code, ErrorCode::ValidationFailed);
+        create_admin(&conn, "admin", "12345678").unwrap();
+        let e = reset_password(&mut conn, "admin", "1234567").unwrap_err();
+        assert_eq!(e.code, ErrorCode::ValidationFailed);
+        reset_password(&mut conn, "admin", "12345678").unwrap();
     }
 
     #[test]
@@ -357,6 +426,23 @@ mod tests {
         );
         let e = reset_password(&mut conn, "ghost", "a brand new password").unwrap_err();
         assert_eq!(e.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn reset_password_clears_first_change_flag() {
+        let mut conn = test_conn();
+        let admin = insert_default_admin(&conn).unwrap();
+        let (token, _) = create_session(&conn, &admin.id, 30, 24).unwrap();
+        assert!(password_change_required(&conn, &admin.id).unwrap());
+
+        reset_password(&mut conn, "admin", "new-admin-password").unwrap();
+
+        assert!(!password_change_required(&conn, &admin.id).unwrap());
+        assert!(lookup_session(&conn, &token).unwrap().is_none());
+        let logged_in = verify_admin_password(&conn, "admin", "new-admin-password")
+            .unwrap()
+            .unwrap();
+        assert!(!logged_in.must_change_password);
     }
 
     #[test]

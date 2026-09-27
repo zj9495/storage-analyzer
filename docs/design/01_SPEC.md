@@ -95,7 +95,7 @@ V1 只开放本地应用管理员角色，支持一个初始管理员和后续�
 
 | 页面 | 主要内容 | 主要操作 |
 | --- | --- | --- |
-| 初始化向导 | 时区、管理员、源挂载诊断、输出目录 | 完成初始化、创建首个任务 |
+| 登录/首次改密 | 默认管理员登录、初始密码修改 | 修改初始密码并重新登录 |
 | 总览 `/overview` | 容量卡片、趋势、数据时间、最近任务、异常 | 切换卷/时间范围、立即扫描 |
 | 数据源 `/sources` | 源列表、身份、文件系统、权限、可用性 | 登记、探测、编辑、停用 |
 | 报告任务 `/profiles` | 调度、状态、保留策略、最近结果 | 创建/复制/编辑/执行/删除 |
@@ -108,11 +108,11 @@ V1 只开放本地应用管理员角色，支持一个初始管理员和后续�
 
 ### 3.3 初始化流程
 
-容器启动后先进行配置和数据库自检。尚未初始化时，只开放健康检查、初始化状态和设置接口，普通业务接口返回 `SETUP_REQUIRED`。
+容器启动后先进行配置和数据库自检。空数据目录自动创建默认管理员 `admin/admin`，并将账号标记为必须首次改密；初始化时区取部署配置中的 `server.default_timezone`。
 
-初始化令牌由本地 CLI 命令生成，写到 `/data/setup-token`，文件权限 `0600`；不打印到常规日志。管理员通过容器终端读取，或使用部署时指定的秘密文件。令牌单次有效，默认 30 分钟；CLI 可重新生成。网页创建管理员时必须提交令牌并设置至少 12 字符密码。数据库和令牌状态的变更应原子完成，防止两个浏览器同时抢注。
+首次登录可以建立受限会话，但在修改密码前只能访问当前用户、改密和登出接口。新密码至少 8 个字符，改密成功后撤销该管理员的全部会话并要求重新登录。已有初始化实例保留现有管理员、密码和会话状态。
 
-向导探测每个源的挂载可见性、目录可遍历性、卷归属、预期只读状态、文件系统与时间戳能力。只读检查依据挂载信息，不在用户目录创建测试文件。数据目录的读写检查仅允许在 `/data` 下创建应用自有探测文件。
+数据源页面探测每个源的挂载可见性、目录可遍历性、卷归属、预期只读状态、文件系统与时间戳能力。只读检查依据挂载信息，不在用户目录创建测试文件。数据目录的读写检查仅允许在 `/data` 下创建应用自有探测文件。
 
 默认建议首个任务做元数据扫描；用户理解额外磁盘读取后再启用重复内容检测。
 
@@ -786,7 +786,7 @@ manifest 含 schema_version、应用版本、profile/ruleset/scope fingerprints�
 
 ### 17.1 通用约定
 
-API 前缀 `/api/v1`，JSON UTF-8。同源 cookie 会话；除初始化、登录和最小健康检查外，全部接口需管理员身份。所有修改类请求要 CSRF；耗时操作返回 202 与 job_id，不阻塞 HTTP 直到扫描完成。
+API 前缀 `/api/v1`，JSON UTF-8。同源 cookie 会话；除登录和最小健康检查外，全部接口需管理员身份。所有修改类请求要 CSRF；耗时操作返回 202 与 job_id，不阻塞 HTTP 直到扫描完成。
 
 所有字节数、inode/device 标识、可能超过 JavaScript 安全整数的数值以十进制字符串传输。文件时间以 RFC3339 UTC 展示字段加秒/纳秒原始字段表达；无法表达的时间显示 null 与原因。普通受限计数可以 JSON number，但不得丢失精度。
 
@@ -807,15 +807,14 @@ API 前缀 `/api/v1`，JSON UTF-8。同源 cookie 会话；除初始化、登录
 
 HTTP 400 格式错误；401 未登录；403 未授权/只读；404 不存在；409 状态/版本/身份冲突；410 明细或计划过期；422 业务校验失败；429 限流；503 容量/能力暂不可用。保留稳定错误码，前端不解析中文错误文本做逻辑判断。
 
-需要的错误码至少包括：SETUP_REQUIRED、READ_ONLY_MODE、PATH_OUTSIDE_ROOT、SOURCE_IDENTITY_CHANGED、SOURCE_UNAVAILABLE、DETAIL_EXPIRED、REPORT_INCOMPATIBLE、FILE_CHANGED、HASH_INCOMPLETE、PLAN_EXPIRED、PROTECTED_FILE、HARDLINK_NOT_ALLOWED、NO_SURVIVING_COPY、QUARANTINE_CONFLICT、INSUFFICIENT_DATA_SPACE、UNSUPPORTED_CAPABILITY、JOB_STATE_CONFLICT、RESOURCE_BUSY、RESOURCE_BUDGET_EXCEEDED。
+需要的错误码至少包括：PASSWORD_CHANGE_REQUIRED、READ_ONLY_MODE、PATH_OUTSIDE_ROOT、SOURCE_IDENTITY_CHANGED、SOURCE_UNAVAILABLE、DETAIL_EXPIRED、REPORT_INCOMPATIBLE、FILE_CHANGED、HASH_INCOMPLETE、PLAN_EXPIRED、PROTECTED_FILE、HARDLINK_NOT_ALLOWED、NO_SURVIVING_COPY、QUARANTINE_CONFLICT、INSUFFICIENT_DATA_SPACE、UNSUPPORTED_CAPABILITY、JOB_STATE_CONFLICT、RESOURCE_BUSY、RESOURCE_BUDGET_EXCEEDED。
 
 ### 17.2 路由清单
 
 | 路由（均省略 /api/v1） | 方法 | 请求/响应及行为 |
 | --- | --- | --- |
-| `/setup/status` | GET | 仅返回 initialized 和是否可初始化，不返回 token |
-| `/setup/complete` | POST | setup_token、username、password、timezone；成功即撤销初始化令牌 |
 | `/auth/login`、`/auth/logout` | POST | 登录限流；登出撤销服务端会话 |
+| `/auth/change-password` | POST | 首次登录修改密码；成功后撤销全部会话 |
 | `/auth/me` | GET | 当前管理员、会话到期与功能能力 |
 | `/auth/reauth` | POST | 验证密码，返回 5 分钟危险操作 token |
 | `/admins`、`/admins/{id}` | GET/POST/PATCH/DELETE | 管理员管理；防止删除最后一人 |
@@ -863,7 +862,7 @@ HTTP 400 格式错误；401 未登录；403 未授权/只读；404 不存在；4
 | `/settings/restore/apply` | POST | 确认并备份现有配置后原子更新 |
 | `/diagnostics`、`/audit` | GET | 分页脱敏输出，不泄露凭据 |
 
-`/health/live`、`/health/ready` 不在 API 前缀下。live 只检查进程；ready 检查数据库和配置是否可服务，不因某一个扫描源离线就把整个应用判死。尚未初始化时 ready 可返回受限就绪状态，避免健康检查阻止管理员完成初始化。
+`/health/live`、`/health/ready` 不在 API 前缀下。live 只检查进程；ready 检查数据库和配置是否可服务，不因某一个扫描源离线就把整个应用判死。
 
 ### 17.3 创建任务请求样例
 
@@ -938,7 +937,7 @@ APP_UID/APP_GID 是 Compose user 的输入，不是仅仅写两个 PUID/PGID 环
 3. 复制 `.env.example` 为 `.env`，填写真实目录、运行 UID/GID、NAS 局域网绑定 IP、端口和时区。预创建数据目录，授权专用应用身份；不要扩大源目录权限。
 4. 复制配置与 Compose 示例为生产配置。在 UGOS Docker 的 Project 中导入，或在项目目录使用 Docker Compose。UI 流程以设备版本为准；官方文档展示了 Project 部署途径。[S6]
 5. 部署前运行配置校验和 Compose 展开检查；启动后检查健康状态、日志和源只读诊断。
-6. 通过容器 CLI 获取初始化 token，完成管理员配置。先在小型测试源扫描，再接入真实大目录。
+6. 使用默认 `admin/admin` 登录并完成首次改密。先在小型测试源扫描，再接入真实大目录。
 7. 验证容量与 NAS/系统工具的差异说明，验证导出、邮件、重启恢复后，才考虑开启可写整理模式。
 
 实现后的 CLI 约定：
@@ -946,7 +945,6 @@ APP_UID/APP_GID 是 Compose user 的输入，不是仅仅写两个 PUID/PGID 环
 ```bash
 nas-analyzer config-check --config /config/config.yaml
 nas-analyzer healthcheck --url http://127.0.0.1:8080/health/ready
-nas-analyzer admin setup-token --data-dir /data
 nas-analyzer admin reset-password --data-dir /data --username admin
 nas-analyzer backup --data-dir /data --output /data/config-backups/backup.zip
 nas-analyzer restore --data-dir /data --input /data/config-backups/backup.zip --dry-run
@@ -997,7 +995,7 @@ CLI 不把明文密码作为命令行参数，使用交互输入或秘密文件�
 
 ### 20.1 必须通过的闭环
 
-从一个空 `/data` 开始，完成初始化、源诊断、创建计划、元数据扫描、分类报告、重复校验、历史查看、CSV/HTML 导出、SMTP 测试、配置备份恢复。可写模式另外在测试目录完成预演、隔离、恢复、重新隔离与永久清理。
+从一个空 `/data` 开始，使用 `admin/admin` 登录并完成首次改密，然后完成源诊断、创建计划、元数据扫描、分类报告、重复校验、历史查看、CSV/HTML 导出、SMTP 测试、配置备份恢复。可写模式另外在测试目录完成预演、隔离、恢复、重新隔离与永久清理。
 
 直接关闭容器后重启，历史与任务配置保留；中断任务不假装成功；外接源缺失不引发全目录“已删除”统计；修改分类不改写旧报告；重复点击运行与清理不会重复执行。
 

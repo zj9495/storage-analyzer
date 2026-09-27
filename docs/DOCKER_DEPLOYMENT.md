@@ -141,18 +141,13 @@ Compose 保留只读根文件系统、只读扫描源、非 root 用户和资源
 `APP_MEMORY_LIMIT` 是容器总内存硬限制，包含 API 和扫描 worker；配置文件中的
 进程内存预算不等同于该硬限制。
 
-## 5. 首次初始化
+## 5. 首次登录
 
-服务启动后生成一次性初始化令牌：
+服务首次启动时会自动创建默认管理员账号 `admin/admin`。
+打开 `http://<NAS局域网IP>:3010` 登录后，系统会强制进入修改密码页面；
+新密码至少 8 位，修改成功后需要使用新密码重新登录。
 
-```bash
-docker compose --env-file .env -f compose.yaml exec analyzer /usr/local/bin/nas-analyzer admin setup-token --data-dir /data
-docker compose --env-file .env -f compose.yaml exec analyzer cat /data/setup-token
-```
-
-令牌单次有效，有效期 30 分钟。打开 `http://<NAS局域网IP>:3010`，
-在初始化页面输入令牌，设置管理员账号、至少 12 位密码及应用时区。
-令牌过期时重新执行生成命令；已经初始化的实例无需重复初始化。
+已经初始化的实例继续使用原有管理员账号和密码。
 
 登录后在扫描源配置中使用已批准挂载 `main` 对应的容器路径 `/sources/main`，
 先选择小目录执行扫描，确认文件读取、任务完成和报告展示正常。

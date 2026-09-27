@@ -7,7 +7,6 @@ import { useMe } from '../features/auth/useMe'
 /**
  * 认证守卫：通过 TanStack Query 查询 /auth/me。
  * - 401 → 跳转 /login
- * - 503 + SETUP_REQUIRED → 跳转 /setup 初始化向导
  * - 其他错误 → 明确呈现，不当作“未登录”静默处理
  */
 export function RequireAuth({ children }: { children: ReactNode }) {
@@ -33,9 +32,6 @@ export function RequireAuth({ children }: { children: ReactNode }) {
     if (isApiError(me.error) && me.error.status === 401) {
       return <Navigate to="/login" state={{ from: location }} replace />
     }
-    if (isApiError(me.error, 'SETUP_REQUIRED')) {
-      return <Navigate to="/setup" replace />
-    }
     return (
       <Result
         status="error"
@@ -46,6 +42,10 @@ export function RequireAuth({ children }: { children: ReactNode }) {
         extra={<Button onClick={() => void me.refetch()}>重试</Button>}
       />
     )
+  }
+
+  if (me.data.admin.must_change_password && location.pathname !== '/change-password') {
+    return <Navigate to="/change-password" replace />
   }
 
   return <>{children}</>

@@ -138,6 +138,11 @@ pub static CONTROL_MIGRATIONS: &[Migration] = &[
             "../../../../migrations/control/0009_internal_notification_event_keys.sql"
         ),
     },
+    Migration {
+        version: 10,
+        name: "password_change_required",
+        sql: include_str!("../../../../migrations/control/0010_password_change_required.sql"),
+    },
 ];
 
 pub static INDEX_MIGRATIONS: &[Migration] = &[
@@ -266,6 +271,40 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn password_flag_migration_preserves_existing_admin_and_sessions() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &CONTROL_MIGRATIONS[..9]).unwrap();
+        let (password_hash, password_params) =
+            crate::auth::hash_password("legacy-password").unwrap();
+        conn.execute(
+            "INSERT INTO admin_users
+             (id, username, password_hash, password_params_json, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+            rusqlite::params![
+                "legacy-admin",
+                "legacy",
+                password_hash,
+                password_params,
+                crate::auth::now_rfc3339(),
+            ],
+        )
+        .unwrap();
+        let (token, _) = crate::auth::create_session(&conn, "legacy-admin", 30, 24).unwrap();
+
+        apply(&mut conn, CONTROL_MIGRATIONS).unwrap();
+
+        let admin = crate::auth::verify_admin_password(&conn, "legacy", "legacy-password")
+            .unwrap()
+            .unwrap();
+        assert!(!admin.must_change_password);
+        assert!(
+            crate::auth::lookup_session(&conn, &token)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

@@ -56,11 +56,6 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AdminAction {
-    /// Generate a new one-time setup token written to <data-dir>/setup-token.
-    SetupToken {
-        #[arg(long)]
-        data_dir: String,
-    },
     /// Reset an admin password (interactive prompt; revokes sessions).
     ResetPassword {
         #[arg(long)]
@@ -77,9 +72,6 @@ fn main() -> anyhow::Result<()> {
         Command::Healthcheck { url } => nas_analyzer::cli::healthcheck(&url),
         Command::Serve { config } => nas_analyzer::cli::serve(&config),
         Command::Worker { config, job_id } => nas_analyzer::cli::worker(config.as_deref(), &job_id),
-        Command::Admin {
-            action: AdminAction::SetupToken { data_dir },
-        } => nas_analyzer::cli::admin_setup_token(&data_dir),
         Command::Admin {
             action: AdminAction::ResetPassword { data_dir, username },
         } => nas_analyzer::cli::admin_reset_password(&data_dir, &username),

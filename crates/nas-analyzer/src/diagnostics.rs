@@ -409,7 +409,6 @@ approved_mounts:
     allow_submounts: false
 security:
   allow_write_operations: false
-  setup_token_minutes: 30
   session_idle_minutes: 30
   session_absolute_hours: 24
   reauth_minutes: 5
@@ -481,7 +480,7 @@ sampling:
         )
         .unwrap();
         let info = collect(&conn, &cfg, false, &memory_budget).unwrap();
-        assert_eq!(info.schema_migrations.control, 9);
+        assert_eq!(info.schema_migrations.control, 10);
         assert_eq!(info.sources[0].availability, "online");
         assert_eq!(info.memory_budget.api_budget_mib, 64);
         assert!(matches!(

@@ -18,19 +18,17 @@ SOURCE_ROOT="$RUN_ROOT/sources"
 CONFIG_PATH="$RUN_ROOT/config.yaml"
 RESPONSE_ROOT="$RUN_ROOT/responses"
 COOKIE_JAR="$RUN_ROOT/cookies.txt"
-SETUP_TOKEN="$DATA_ROOT/setup-token"
 BACKEND_LOG="$RUN_ROOT/backend.log"
-SETUP_LOG="$RUN_ROOT/setup.log"
 BACKEND_PID=""
 BACKEND_CONTAINER_NAME=""
-SETUP_CONTAINER_NAME=""
 DATA_VOLUME_NAME=""
 RESPONSE_SEQ=0
 LAST_RESPONSE=""
 LAST_EVIDENCE=""
 CSRF_TOKEN=""
-ADMIN_PASSWORD="$(openssl rand -hex 24)"
-ADMIN_USERNAME="real-api-admin"
+ADMIN_USERNAME="admin"
+NEW_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+ADMIN_PASSWORD="admin"
 CONFIG_LISTEN="127.0.0.1:${API_PORT}"
 CONFIG_DATA_DIR="$DATA_ROOT"
 CONFIG_OUTPUT_ROOT="$DATA_ROOT/exports"
@@ -59,13 +57,12 @@ cleanup() {
   fi
   if [[ -n "$BACKEND_CONTAINER_NAME" ]]; then
     docker rm -f "$BACKEND_CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker rm -f "$SETUP_CONTAINER_NAME" >/dev/null 2>&1 || true
     docker volume rm "$DATA_VOLUME_NAME" >/dev/null 2>&1 || true
   fi
   if [[ "$status" -eq 0 ]]; then
     rm -rf -- "$RUN_ROOT"
   else
-    rm -f -- "$COOKIE_JAR" "$SETUP_TOKEN" "$RUN_ROOT/setup.json" "$RUN_ROOT/login.json" "$RUN_ROOT/reauth.json" "$RUN_ROOT/reauth-restore.json"
+    rm -f -- "$COOKIE_JAR" "$RUN_ROOT/login.json" "$RUN_ROOT/change-password.json" "$RUN_ROOT/reauth.json" "$RUN_ROOT/reauth-restore.json"
     rm -f -- "$RESPONSE_ROOT"/.raw-*.json
     printf 'Evidence retained at: %s\n' "$RUN_ROOT" >&2
   fi
@@ -83,7 +80,6 @@ if [[ -n "${REAL_API_DOCKER_IMAGE:-}" ]]; then
   [[ -z "${REAL_API_BINARY:-}" ]] || fail 'REAL_API_DOCKER_IMAGE and REAL_API_BINARY cannot both be set'
   require_command docker
   BACKEND_CONTAINER_NAME="nas-storage-analyzer-real-api-${BASHPID}"
-  SETUP_CONTAINER_NAME="${BACKEND_CONTAINER_NAME}-setup"
   DATA_VOLUME_NAME="${BACKEND_CONTAINER_NAME}-data"
   docker volume create "$DATA_VOLUME_NAME" >/dev/null || fail "could not create temporary Docker data volume"
   docker run --rm --user 0:0 --entrypoint /bin/chown \
@@ -99,12 +95,6 @@ if [[ -n "${REAL_API_DOCKER_IMAGE:-}" ]]; then
     --mount "type=volume,source=$DATA_VOLUME_NAME,target=/data" \
     --mount "type=bind,source=$CONFIG_PATH,target=/config/config.yaml,readonly" \
     "${REAL_API_DOCKER_IMAGE}")
-  SETUP_COMMAND=(docker run --init --read-only --cap-drop=ALL \
-    --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
-    --pids-limit=128 --cpus=2 --memory=1g --user 1000:1000 \
-    --name "$SETUP_CONTAINER_NAME" \
-    --mount "type=volume,source=$DATA_VOLUME_NAME,target=/data" \
-    "${REAL_API_DOCKER_IMAGE}")
   BACKEND_COMMAND=(docker run --rm --init --read-only --cap-drop=ALL \
     --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
     --pids-limit=128 --cpus=2 --memory=1g --user 1000:1000 \
@@ -115,7 +105,6 @@ if [[ -n "${REAL_API_DOCKER_IMAGE:-}" ]]; then
     "${REAL_API_DOCKER_IMAGE}")
 else
   UTILITY_COMMAND=()
-  SETUP_COMMAND=()
   BACKEND_COMMAND=(cargo run --locked -p nas-analyzer --)
 fi
 
@@ -170,20 +159,6 @@ if [[ -n "${REAL_API_DOCKER_IMAGE:-}" ]]; then
 else
   "${BACKEND_COMMAND[@]}" config-check --config "$CONFIG_PATH" > "$RUN_ROOT/config-check.log" 2>&1 || fail "config-check failed"
 fi
-
-printf '%s\n' '== create one-time setup token in temporary SQLite data root'
-if [[ -n "${REAL_API_DOCKER_IMAGE:-}" ]]; then
-  "${SETUP_COMMAND[@]}" admin setup-token --data-dir /data > "$SETUP_LOG" 2>&1 || fail "setup-token command failed"
-  docker cp "$SETUP_CONTAINER_NAME:/data/setup-token" "$SETUP_TOKEN" >/dev/null \
-    || fail "could not copy setup token from temporary Docker container"
-  docker rm "$SETUP_CONTAINER_NAME" >/dev/null \
-    || fail "could not remove setup-token container"
-else
-  "${BACKEND_COMMAND[@]}" admin setup-token --data-dir "$DATA_ROOT" > "$SETUP_LOG" 2>&1 || fail "setup-token command failed"
-fi
-[[ -s "$SETUP_TOKEN" ]] || fail "setup token file was not created"
-SETUP_TOKEN_VALUE="$(tr -d '\r\n' < "$SETUP_TOKEN")"
-[[ -n "$SETUP_TOKEN_VALUE" ]] || fail "setup token file is empty"
 
 printf '%s\n' '== start local HTTP service'
 if [[ -n "${REAL_API_DOCKER_IMAGE:-}" ]]; then
@@ -306,26 +281,27 @@ wait_for_export_ready() {
   fail "$label: export did not become ready within 120 seconds"
 }
 
-printf '%s\n' '== public setup status'
-api_get setup-status /api/v1/setup/status 200
-assert_response setup-status '.data.initialized == false and .data.can_initialize == true'
-
-printf '%s\n' '== initialize and login through HTTP'
-SETUP_BODY="$RUN_ROOT/setup.json"
-jq -n --arg token "$SETUP_TOKEN_VALUE" --arg username "$ADMIN_USERNAME" --arg password "$ADMIN_PASSWORD" \
-  '{setup_token:$token, username:$username, password:$password, timezone:"UTC"}' > "$SETUP_BODY"
-api_request setup-complete POST /api/v1/setup/complete 201 "$SETUP_BODY" "$SETUP_TOKEN_VALUE" ''
-assert_response setup-complete '.data.username == $username' --arg username "$ADMIN_USERNAME"
-CSRF_TOKEN="$(jq -er '.data.csrf_token' "$LAST_RESPONSE")" || fail 'setup response has no csrf_token'
-
-jq -n '{}' > "$RUN_ROOT/logout.json"
-api_json logout POST /api/v1/auth/logout 200 "$RUN_ROOT/logout.json"
-CSRF_TOKEN=''
+printf '%s\n' '== login with the default credentials'
 jq -n --arg username "$ADMIN_USERNAME" --arg password "$ADMIN_PASSWORD" \
   '{username:$username, password:$password}' > "$RUN_ROOT/login.json"
 api_request login POST /api/v1/auth/login 200 "$RUN_ROOT/login.json" '' ''
 CSRF_TOKEN="$(jq -er '.data.csrf_token' "$LAST_RESPONSE")" || fail 'login response has no csrf_token'
 assert_response login '.data.admin.username == $username' --arg username "$ADMIN_USERNAME"
+assert_response login-default-password '.data.admin.must_change_password == true'
+
+printf '%s\n' '== force the first password change'
+jq -n --arg password "$NEW_ADMIN_PASSWORD" '{new_password:$password}' > "$RUN_ROOT/change-password.json"
+api_json change-password POST /api/v1/auth/change-password 200 "$RUN_ROOT/change-password.json"
+CSRF_TOKEN=''
+
+printf '%s\n' '== re-login with the changed password'
+jq -n --arg username "$ADMIN_USERNAME" --arg password "$NEW_ADMIN_PASSWORD" \
+  '{username:$username, password:$password}' > "$RUN_ROOT/login.json"
+api_request relogin POST /api/v1/auth/login 200 "$RUN_ROOT/login.json" '' ''
+CSRF_TOKEN="$(jq -er '.data.csrf_token' "$LAST_RESPONSE")" || fail 'relogin response has no csrf_token'
+assert_response relogin '.data.admin.username == $username' --arg username "$ADMIN_USERNAME"
+assert_response relogin-password-cleared '.data.admin.must_change_password == false'
+ADMIN_PASSWORD="$NEW_ADMIN_PASSWORD"
 
 api_get capabilities /api/v1/auth/me 200
 assert_response readonly-capability '.data.capabilities.write_operations_allowed == false and .data.capabilities.can_cleanup == false'

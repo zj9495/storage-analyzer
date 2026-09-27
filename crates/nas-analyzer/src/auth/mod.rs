@@ -1,9 +1,9 @@
 //! Authentication and session management (spec 3.3, 14.1).
 //!
 //! Covers Argon2id password hashing with persisted parameters, admin account
-//! CRUD with last-admin protection, one-time setup tokens, opaque session
-//! tokens (only SHA-256 digests stored), single-use re-authentication tokens
-//! and an in-process login rate limiter.
+//! CRUD with last-admin protection, first-run bootstrap, opaque session tokens
+//! (only SHA-256 digests stored), single-use re-authentication tokens and an
+//! in-process login rate limiter.
 //!
 //! All functions are synchronous and operate directly on a
 //! [`rusqlite::Connection`]; callers run them inside the store writer thread.
@@ -16,8 +16,8 @@ mod session;
 mod setup;
 
 pub use admin::{
-    AdminUser, create_admin, delete_admin, list_admins, reset_password, set_enabled,
-    verify_admin_password,
+    AdminUser, create_admin, delete_admin, list_admins, password_change_required, reset_password,
+    set_enabled, verify_admin_password,
 };
 pub use password::{
     PasswordParams, default_password_params, hash_password, password_needs_upgrade, verify_password,
@@ -27,7 +27,7 @@ pub use reauth::{consume_reauth_token, create_reauth_token};
 pub use session::{
     Session, create_session, lookup_session, revoke_all_user_sessions, revoke_session,
 };
-pub use setup::{complete_setup, consume_setup_token, generate_setup_token, is_initialized};
+pub use setup::{bootstrap_default_admin, is_initialized};
 
 use rand::RngCore;
 use sha2::{Digest, Sha256};

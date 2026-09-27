@@ -212,11 +212,6 @@ export interface MeResponse {
   }
 }
 
-export interface SetupStatusResponse {
-  initialized: boolean
-  can_initialize: boolean
-}
-
 export interface ReauthResponse {
   reauth_token: string
   expires_at: Schema['DateTime']

@@ -1,4 +1,4 @@
-//! Route handlers for the M1 surface: health, setup, auth, admins, mounts,
+//! Route handlers for the M1 surface: health, auth, admins, mounts,
 //! sources, volumes. DB access goes through the store writer thread or the
 //! read pool; directory listing runs on `spawn_blocking` (spec 15.6).
 
@@ -30,8 +30,8 @@ use sha2::{Digest, Sha256};
 use tokio_util::io::ReaderStream;
 
 use super::{
-    ApiJson, AppState, Auth, CSRF_HEADER, RequestId, append_cookies, client_ip, csrf_cookie,
-    err_response, expired_cookie, internal, list_meta, ok_response, respond, session_cookie,
+    ApiJson, AppState, Auth, RequestId, append_cookies, client_ip, csrf_cookie, err_response,
+    expired_cookie, internal, list_meta, ok_response, respond, session_cookie,
 };
 use crate::audit;
 use crate::auth::{self, AdminUser};
@@ -111,6 +111,7 @@ fn admin_json(a: &AdminUser) -> Value {
         "id": a.id,
         "username": a.username,
         "enabled": a.enabled,
+        "must_change_password": a.must_change_password,
         "created_at": a.created_at,
     })
 }
@@ -369,13 +370,6 @@ fn session_max_age_secs(st: &AppState) -> u64 {
     u64::from(st.config.security.session_absolute_hours) * 3600
 }
 
-fn setup_csrf_matches(headers: &HeaderMap, setup_token: &str) -> bool {
-    headers
-        .get(CSRF_HEADER)
-        .and_then(|value| value.to_str().ok())
-        == Some(setup_token)
-}
-
 fn required_idempotency_key(headers: &HeaderMap) -> AppResult<String> {
     let value = headers.get("idempotency-key").ok_or_else(|| {
         AppError::new(ErrorCode::BadRequest, "请求必须携带有效的 Idempotency-Key")
@@ -460,9 +454,7 @@ pub async fn health_live() -> Json<Value> {
     Json(json!({"status": "ok"}))
 }
 
-/// Ready checks DB reachability. Before initialization the app reports a
-/// limited-ready 200 so health checks never block the setup wizard (spec
-/// 17.2); one offline source never affects readiness.
+/// Ready checks DB reachability; one offline source never affects readiness.
 pub async fn health_ready(State(st): State<AppState>) -> Response {
     let result = st
         .readers
@@ -498,110 +490,6 @@ pub async fn health_ready(State(st): State<AppState>) -> Response {
             })),
         )
             .into_response(),
-    }
-}
-
-// ---- setup (public) ----
-
-fn has_valid_setup_token(conn: &rusqlite::Connection) -> AppResult<bool> {
-    let now = auth::now_rfc3339();
-    let n: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM setup_tokens WHERE used = 0 AND expires_at > ?1",
-            [now],
-            |r| r.get(0),
-        )
-        .map_err(|e| internal(format!("读取初始化令牌状态失败: {e}")))?;
-    Ok(n > 0)
-}
-
-pub async fn setup_status(req_id: RequestId, State(st): State<AppState>) -> Response {
-    let initialized = st.is_initialized();
-    let result = st
-        .readers
-        .call(|c| has_valid_setup_token(c))
-        .await
-        .map(|can| {
-            (
-                StatusCode::OK,
-                json!({"initialized": initialized, "can_initialize": can}),
-                json!({}),
-            )
-        });
-    respond(&req_id, result)
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SetupCompleteBody {
-    setup_token: String,
-    username: String,
-    password: String,
-    timezone: String,
-}
-
-pub async fn setup_complete(
-    req_id: RequestId,
-    State(st): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    ApiJson(body): ApiJson<SetupCompleteBody>,
-) -> Response {
-    let ip = client_ip(&st.config.server, peer, &headers);
-    const RL_KEY: &str = "~setup";
-    if let Err(e) = st.rate_limiter.check(&ip, RL_KEY) {
-        return err_response(&req_id.0, e);
-    }
-    if !setup_csrf_matches(&headers, &body.setup_token) {
-        return err_response(
-            &req_id.0,
-            AppError::new(
-                ErrorCode::Forbidden,
-                "初始化请求的 X-CSRF-Token 必须与 setup_token 完全一致",
-            ),
-        );
-    }
-    let idle = i64::from(st.config.security.session_idle_minutes);
-    let absolute = i64::from(st.config.security.session_absolute_hours);
-    let result = st
-        .writer
-        .call(move |c| {
-            let admin = auth::complete_setup(
-                c,
-                &body.setup_token,
-                &body.username,
-                &body.password,
-                &body.timezone,
-            )?;
-            let (token, csrf) = auth::create_session(c, &admin.id, idle, absolute)?;
-            Ok((admin, token, csrf))
-        })
-        .await;
-    match result {
-        Ok((admin, token, csrf)) => {
-            st.initialized
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            st.rate_limiter.record_success(&ip, RL_KEY);
-            let mut data = admin_json(&admin);
-            data["csrf_token"] = json!(csrf);
-            let mut resp = ok_response(&req_id.0, StatusCode::CREATED, data, json!({}));
-            let secure = secure_cookies(&st);
-            let max_age = session_max_age_secs(&st);
-            append_cookies(
-                &mut resp,
-                &[
-                    session_cookie(&token, max_age, secure),
-                    csrf_cookie(&csrf, max_age, secure),
-                ],
-            );
-            resp
-        }
-        Err(e) => {
-            if e.code == ErrorCode::Unauthorized {
-                st.rate_limiter.record_failure(&ip, RL_KEY);
-            }
-            err_response(&req_id.0, e)
-        }
     }
 }
 
@@ -738,6 +626,30 @@ pub async fn me(req_id: RequestId, State(st): State<AppState>, auth: Auth) -> Re
             ))
         })
         .await;
+    respond(&req_id, result)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangePasswordBody {
+    new_password: String,
+}
+
+pub async fn change_password(
+    req_id: RequestId,
+    State(st): State<AppState>,
+    authn: Auth,
+    ApiJson(body): ApiJson<ChangePasswordBody>,
+) -> Response {
+    let user_id = authn.session.user_id.clone();
+    let result = st
+        .writer
+        .call(move |c| {
+            let admin = find_admin_by_id(&auth::list_admins(c)?, &user_id)?;
+            auth::reset_password(c, &admin.username, &body.new_password)
+        })
+        .await
+        .map(|_| (StatusCode::OK, json!({}), json!({})));
     respond(&req_id, result)
 }
 
@@ -9601,7 +9513,6 @@ mod backup_request_tests {
             approved_mounts: Vec::<ApprovedMount>::new(),
             security: SecurityConfig {
                 allow_write_operations: false,
-                setup_token_minutes: 30,
                 session_idle_minutes: 30,
                 session_absolute_hours: 24,
                 reauth_minutes: 5,
@@ -9917,7 +9828,7 @@ mod backup_request_tests {
         let (root, state, guard) = start_test_state();
         let admin = state
             .writer
-            .call(|conn| crate::auth::create_admin(conn, "admin", "a very long password"))
+            .call(|conn| crate::auth::create_admin(conn, "restore-admin", "a very long password"))
             .await
             .unwrap();
         let backup_path = root.path().join("config-backups/input.zip");

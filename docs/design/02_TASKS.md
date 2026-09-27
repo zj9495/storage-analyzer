@@ -27,9 +27,9 @@ Rust/React 专项：落实主规格 15.1–15.10 与 `04_STACK_DECISION.md`，�
 
 关联：F04、F05、F13、F16、F18。
 
-任务：配置解析和严格校验；非 root 单容器；初始化 token 和管理员；会话、CSRF、登录限速；部署批准根和 Source CRUD；源只读诊断；Volume 登记/身份确认；目录选择必须根内且 no-follow；CLI config-check、healthcheck 和 setup-token。
+任务：配置解析和严格校验；非 root 单容器；默认管理员和首次改密；会话、CSRF、登录限速；部署批准根和 Source CRUD；源只读诊断；Volume 登记/身份确认；目录选择必须根内且 no-follow；CLI config-check、healthcheck。
 
-完成标准：空数据目录可初始化；重复初始化拒绝；越界目录访问拒绝；源离线不使整个应用无法登录；只读模式写 API 403；源数据未发生修改；Compose 的配置展开结果与实际挂载一致。
+完成标准：空数据目录可用 `admin/admin` 登录并完成首次改密；已有实例账号不被迁移重置；越界目录访问拒绝；源离线不使整个应用无法登录；只读模式写 API 403；源数据未发生修改；Compose 的配置展开结果与实际挂载一致。
 
 必须先完成 fssecure 读取边界再开始扫描，而不是先使用 std::fs::File::open 任意路径，最后补安全。
 

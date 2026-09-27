@@ -7,7 +7,7 @@ info:
 
     通用约定（spec 17.1）：
     - API 前缀 `/api/v1`，JSON UTF-8；`/health/live`、`/health/ready` 不带前缀。
-    - 同源 Cookie 会话；除 setup/login/health 外全部接口需管理员身份。
+    - 同源 Cookie 会话；除 login/health 外全部接口需管理员身份。
     - 所有修改类（非 GET）请求需要 `X-CSRF-Token` 头与 Origin 校验。
     - 耗时操作返回 202 与 `job_id`，不阻塞 HTTP。
     - 所有字节数、inode/device 标识、可能超过 2^53 的整数一律以十进制字符串传输。
@@ -23,8 +23,6 @@ servers:
   - url: /
     description: 同源部署；/api/v1 前缀已包含在各路径中
 tags:
-  - name: setup
-    description: 初始化状态与首次管理员配置
   - name: auth
     description: 管理员登录、会话与重新认证
   - name: admins
@@ -59,67 +57,6 @@ tags:
     description: 存活与就绪探针
 
 paths:
-  # ---------------------------------------------------------------- setup
-  /api/v1/setup/status:
-    get:
-      tags: [setup]
-      summary: 初始化状态
-      description: 仅返回 initialized 与是否可初始化，不返回 setup token。无需认证。
-      operationId: getSetupStatus
-      security: []
-      responses:
-        '200':
-          description: 初始化状态
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessEnvelope'
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        required: [initialized, can_initialize]
-                        properties:
-                          initialized: { type: boolean }
-                          can_initialize: { type: boolean, description: 服务端是否仍持有有效 setup token }
-  /api/v1/setup/complete:
-    post:
-      tags: [setup]
-      summary: 完成初始化
-      description: 提交 setup_token、管理员账号与时区；成功即撤销初始化令牌。初始化尚未建立会话时，X-CSRF-Token 必须与 body.setup_token 完全一致；setup_token 是部署时通过 out-of-band 渠道下发的一次性 CSRF proof。
-      operationId: completeSetup
-      security: []
-      parameters:
-        - $ref: '#/components/parameters/CsrfToken'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [setup_token, username, password, timezone]
-              properties:
-                setup_token: { type: string, description: 部署时下发的一次性初始化令牌 }
-                username: { type: string, minLength: 1, maxLength: 64 }
-                password: { type: string, minLength: 12, format: password }
-                timezone: { type: string, description: IANA 时区名，作为部署默认时区 }
-      responses:
-        '201':
-          description: 初始化完成，返回新会话（Set-Cookie）
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessEnvelope'
-                  - type: object
-                    properties:
-                      data: { $ref: '#/components/schemas/AdminUser' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '409': { $ref: '#/components/responses/Conflict' }
-
   # ---------------------------------------------------------------- auth
   /api/v1/auth/login:
     post:
@@ -128,8 +65,6 @@ paths:
       description: 登录按 IP + 账号双重限速；成功返回会话 Cookie 与 CSRF token。
       operationId: login
       security: []
-      parameters:
-        - $ref: '#/components/parameters/CsrfToken'
       requestBody:
         required: true
         content:
@@ -159,6 +94,37 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+  /api/v1/auth/change-password:
+    post:
+      tags: [auth]
+      summary: 修改当前管理员密码
+      description: 首次登录必须调用此接口完成改密；成功后撤销该管理员的全部会话，客户端必须重新登录。
+      operationId: changePassword
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_password]
+              properties:
+                new_password: { type: string, minLength: 8, format: password }
+      responses:
+        '200':
+          description: 密码已修改，当前会话已失效
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { type: object, additionalProperties: false }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
   /api/v1/auth/logout:
     post:
       tags: [auth]
@@ -285,7 +251,7 @@ paths:
               required: [username, password]
               properties:
                 username: { type: string, minLength: 1, maxLength: 64 }
-                password: { type: string, minLength: 12, format: password }
+                password: { type: string, minLength: 8, format: password }
       responses:
         '200':
           description: 已创建
@@ -335,7 +301,7 @@ paths:
             schema:
               type: object
               properties:
-                password: { type: string, minLength: 12, format: password }
+                password: { type: string, minLength: 8, format: password }
                 enabled: { type: boolean }
       responses:
         '200':
@@ -2508,12 +2474,12 @@ paths:
     get:
       tags: [health]
       summary: 就绪探针
-      description: 检查数据库和配置是否可服务；不因某一个扫描源离线判死整个应用。未初始化时返回受限就绪状态，避免阻止管理员完成初始化。
+      description: 检查数据库和配置是否可服务；不因某一个扫描源离线判死整个应用。
       operationId: healthReady
       security: []
       responses:
         '200':
-          description: 可服务（含未初始化时的受限就绪）
+          description: 可服务
           content:
             application/json:
               schema:
@@ -2544,14 +2510,14 @@ components:
       type: apiKey
       in: cookie
       name: nas_analyzer_session
-      description: HttpOnly、SameSite=Lax 会话 Cookie；HTTPS 模式必须 Secure。setup/login/health 除外均需会话。
+      description: HttpOnly、SameSite=Lax 会话 Cookie；HTTPS 模式必须 Secure。login/health 除外均需会话。
 
   parameters:
     CsrfToken:
       name: X-CSRF-Token
       in: header
       required: true
-      description: 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。
+      description: 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。
       schema: { type: string }
     IdempotencyKey:
       name: Idempotency-Key
@@ -2671,7 +2637,7 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
     ServiceUnavailable:
-      description: 503 容量/能力暂不可用（SETUP_REQUIRED、SOURCE_UNAVAILABLE、INSUFFICIENT_DATA_SPACE、UNSUPPORTED_CAPABILITY 等）
+      description: 503 容量/能力暂不可用（SOURCE_UNAVAILABLE、INSUFFICIENT_DATA_SPACE、UNSUPPORTED_CAPABILITY 等）
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
@@ -2744,12 +2710,12 @@ components:
       type: string
       description: |
         稳定错误码与 HTTP 映射（spec 17.1）：
-        - 400 格式错误（BAD_REQUEST）与 PATH_OUTSIDE_ROOT（spec 3.3/ACC-004 固定 400）；401 未登录；403 READ_ONLY_MODE / FORBIDDEN；404 不存在。
+        - 400 格式错误（BAD_REQUEST）与 PATH_OUTSIDE_ROOT（spec 3.3/ACC-004 固定 400）；401 未登录；403 READ_ONLY_MODE / FORBIDDEN / PASSWORD_CHANGE_REQUIRED；404 不存在。
         - 409 CONFLICT / SOURCE_IDENTITY_CHANGED / FILE_CHANGED / QUARANTINE_CONFLICT / JOB_STATE_CONFLICT / REPORT_INCOMPATIBLE / NO_SURVIVING_COPY（副本失效冲突）/ cursor 失效。
         - 410 DETAIL_EXPIRED / PLAN_EXPIRED。
         - 422 VALIDATION_FAILED / PROTECTED_FILE / HARDLINK_NOT_ALLOWED / HASH_INCOMPLETE 及一般业务校验。
         - 429 RATE_LIMITED / RESOURCE_BUSY / RESOURCE_BUDGET_EXCEEDED（含登录限流）。
-        - 503 SETUP_REQUIRED（spec 3.3 初始化前业务接口）/ SOURCE_UNAVAILABLE / INSUFFICIENT_DATA_SPACE / UNSUPPORTED_CAPABILITY。
+        - 503 SOURCE_UNAVAILABLE / INSUFFICIENT_DATA_SPACE / UNSUPPORTED_CAPABILITY。
         前端不解析 message 文本做逻辑判断。
       enum:
         - SETUP_REQUIRED
@@ -2769,6 +2735,7 @@ components:
         - INSUFFICIENT_DATA_SPACE
         - UNSUPPORTED_CAPABILITY
         - JOB_STATE_CONFLICT
+        - PASSWORD_CHANGE_REQUIRED
         - RESOURCE_BUSY
         - RESOURCE_BUDGET_EXCEEDED
         - VALIDATION_FAILED
@@ -2850,11 +2817,12 @@ components:
     # ------------------------------------------------------------ auth / admins
     AdminUser:
       type: object
-      required: [id, username, enabled, created_at]
+      required: [id, username, enabled, must_change_password, created_at]
       properties:
         id: { type: string, format: uuid }
         username: { type: string }
         enabled: { type: boolean }
+        must_change_password: { type: boolean, description: 是否必须先修改初始密码 }
         created_at: { $ref: '#/components/schemas/DateTime' }
 
     # ------------------------------------------------------------ mounts / sources / volumes

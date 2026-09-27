@@ -3,6 +3,7 @@ import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client'
 import { ApiError } from '../../api/errors'
+import type { AdminUser } from '../../api/types'
 import { useMe } from './useMe'
 
 interface LoginForm {
@@ -22,16 +23,24 @@ export function LoginPage() {
 
   const login = useMutation({
     mutationFn: (values: LoginForm) =>
-      api.post('/api/v1/auth/login', values),
-    onSuccess: async () => {
+      api.post<{ admin: AdminUser; csrf_token: string }>('/api/v1/auth/login', values),
+    onSuccess: async (response) => {
       await queryClient.invalidateQueries({ queryKey: ['auth', 'me'] })
-      navigate(from, { replace: true })
+      navigate(
+        response.data.admin.must_change_password ? '/change-password' : from,
+        { replace: true },
+      )
     },
   })
 
   // 已登录用户访问 /login 时直接进入应用
   if (me.data) {
-    return <Navigate to="/overview" replace />
+    return (
+      <Navigate
+        to={me.data.admin.must_change_password ? '/change-password' : '/overview'}
+        replace
+      />
+    )
   }
 
   return (
@@ -46,6 +55,7 @@ export function LoginPage() {
       <Card title="登录 NAS 存储分析" style={{ width: 400 }}>
         <Form<LoginForm>
           layout="vertical"
+          initialValues={{ username: 'admin', password: 'admin' }}
           onFinish={(values) => login.mutate(values)}
         >
           <Form.Item

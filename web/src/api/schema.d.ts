@@ -4,46 +4,6 @@
  */
 
 export interface paths {
-    "/api/v1/setup/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 初始化状态
-         * @description 仅返回 initialized 与是否可初始化，不返回 setup token。无需认证。
-         */
-        get: operations["getSetupStatus"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/setup/complete": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 完成初始化
-         * @description 提交 setup_token、管理员账号与时区；成功即撤销初始化令牌。初始化尚未建立会话时，X-CSRF-Token 必须与 body.setup_token 完全一致；setup_token 是部署时通过 out-of-band 渠道下发的一次性 CSRF proof。
-         */
-        post: operations["completeSetup"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/auth/login": {
         parameters: {
             query?: never;
@@ -58,6 +18,26 @@ export interface paths {
          * @description 登录按 IP + 账号双重限速；成功返回会话 Cookie 与 CSRF token。
          */
         post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/change-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 修改当前管理员密码
+         * @description 首次登录必须调用此接口完成改密；成功后撤销该管理员的全部会话，客户端必须重新登录。
+         */
+        post: operations["changePassword"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1270,7 +1250,7 @@ export interface paths {
         };
         /**
          * 就绪探针
-         * @description 检查数据库和配置是否可服务；不因某一个扫描源离线判死整个应用。未初始化时返回受限就绪状态，避免阻止管理员完成初始化。
+         * @description 检查数据库和配置是否可服务；不因某一个扫描源离线判死整个应用。
          */
         get: operations["healthReady"];
         put?: never;
@@ -1327,16 +1307,16 @@ export interface components {
         };
         /**
          * @description 稳定错误码与 HTTP 映射（spec 17.1）：
-         *     - 400 格式错误（BAD_REQUEST）与 PATH_OUTSIDE_ROOT（spec 3.3/ACC-004 固定 400）；401 未登录；403 READ_ONLY_MODE / FORBIDDEN；404 不存在。
+         *     - 400 格式错误（BAD_REQUEST）与 PATH_OUTSIDE_ROOT（spec 3.3/ACC-004 固定 400）；401 未登录；403 READ_ONLY_MODE / FORBIDDEN / PASSWORD_CHANGE_REQUIRED；404 不存在。
          *     - 409 CONFLICT / SOURCE_IDENTITY_CHANGED / FILE_CHANGED / QUARANTINE_CONFLICT / JOB_STATE_CONFLICT / REPORT_INCOMPATIBLE / NO_SURVIVING_COPY（副本失效冲突）/ cursor 失效。
          *     - 410 DETAIL_EXPIRED / PLAN_EXPIRED。
          *     - 422 VALIDATION_FAILED / PROTECTED_FILE / HARDLINK_NOT_ALLOWED / HASH_INCOMPLETE 及一般业务校验。
          *     - 429 RATE_LIMITED / RESOURCE_BUSY / RESOURCE_BUDGET_EXCEEDED（含登录限流）。
-         *     - 503 SETUP_REQUIRED（spec 3.3 初始化前业务接口）/ SOURCE_UNAVAILABLE / INSUFFICIENT_DATA_SPACE / UNSUPPORTED_CAPABILITY。
+         *     - 503 SOURCE_UNAVAILABLE / INSUFFICIENT_DATA_SPACE / UNSUPPORTED_CAPABILITY。
          *     前端不解析 message 文本做逻辑判断。
          * @enum {string}
          */
-        ErrorCode: "SETUP_REQUIRED" | "READ_ONLY_MODE" | "PATH_OUTSIDE_ROOT" | "SOURCE_IDENTITY_CHANGED" | "SOURCE_UNAVAILABLE" | "DETAIL_EXPIRED" | "REPORT_INCOMPATIBLE" | "FILE_CHANGED" | "HASH_INCOMPLETE" | "PLAN_EXPIRED" | "PROTECTED_FILE" | "HARDLINK_NOT_ALLOWED" | "NO_SURVIVING_COPY" | "QUARANTINE_CONFLICT" | "INSUFFICIENT_DATA_SPACE" | "UNSUPPORTED_CAPABILITY" | "JOB_STATE_CONFLICT" | "RESOURCE_BUSY" | "RESOURCE_BUDGET_EXCEEDED" | "VALIDATION_FAILED" | "NOT_FOUND" | "CONFLICT" | "UNAUTHORIZED" | "FORBIDDEN" | "RATE_LIMITED" | "BAD_REQUEST" | "INTERNAL";
+        ErrorCode: "SETUP_REQUIRED" | "READ_ONLY_MODE" | "PATH_OUTSIDE_ROOT" | "SOURCE_IDENTITY_CHANGED" | "SOURCE_UNAVAILABLE" | "DETAIL_EXPIRED" | "REPORT_INCOMPATIBLE" | "FILE_CHANGED" | "HASH_INCOMPLETE" | "PLAN_EXPIRED" | "PROTECTED_FILE" | "HARDLINK_NOT_ALLOWED" | "NO_SURVIVING_COPY" | "QUARANTINE_CONFLICT" | "INSUFFICIENT_DATA_SPACE" | "UNSUPPORTED_CAPABILITY" | "JOB_STATE_CONFLICT" | "PASSWORD_CHANGE_REQUIRED" | "RESOURCE_BUSY" | "RESOURCE_BUDGET_EXCEEDED" | "VALIDATION_FAILED" | "NOT_FOUND" | "CONFLICT" | "UNAUTHORIZED" | "FORBIDDEN" | "RATE_LIMITED" | "BAD_REQUEST" | "INTERNAL";
         /**
          * @example {
          *       "error": {
@@ -1407,6 +1387,8 @@ export interface components {
             id: string;
             username: string;
             enabled: boolean;
+            /** @description 是否必须先修改初始密码 */
+            must_change_password: boolean;
             created_at: components["schemas"]["DateTime"];
         };
         MountRoot: {
@@ -2503,7 +2485,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description 503 容量/能力暂不可用（SETUP_REQUIRED、SOURCE_UNAVAILABLE、INSUFFICIENT_DATA_SPACE、UNSUPPORTED_CAPABILITY 等） */
+        /** @description 503 容量/能力暂不可用（SOURCE_UNAVAILABLE、INSUFFICIENT_DATA_SPACE、UNSUPPORTED_CAPABILITY 等） */
         ServiceUnavailable: {
             headers: {
                 [name: string]: unknown;
@@ -2514,7 +2496,7 @@ export interface components {
         };
     };
     parameters: {
-        /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+        /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
         CsrfToken: string;
         /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
         IdempotencyKey: string;
@@ -2542,80 +2524,10 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    getSetupStatus: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 初始化状态 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data?: {
-                            initialized: boolean;
-                            /** @description 服务端是否仍持有有效 setup token */
-                            can_initialize: boolean;
-                        };
-                    };
-                };
-            };
-        };
-    };
-    completeSetup: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
-                "X-CSRF-Token": components["parameters"]["CsrfToken"];
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    /** @description 部署时下发的一次性初始化令牌 */
-                    setup_token: string;
-                    username: string;
-                    /** Format: password */
-                    password: string;
-                    /** @description IANA 时区名，作为部署默认时区 */
-                    timezone: string;
-                };
-            };
-        };
-        responses: {
-            /** @description 初始化完成，返回新会话（Set-Cookie） */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data?: components["schemas"]["AdminUser"];
-                    };
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            409: components["responses"]["Conflict"];
-        };
-    };
     login: {
         parameters: {
             query?: never;
-            header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
-                "X-CSRF-Token": components["parameters"]["CsrfToken"];
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -2648,11 +2560,46 @@ export interface operations {
             429: components["responses"]["TooManyRequests"];
         };
     };
+    changePassword: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: password */
+                    new_password: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 密码已修改，当前会话已失效 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data?: Record<string, never>;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
     logout: {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -2715,7 +2662,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -2780,7 +2727,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -2842,7 +2789,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -2872,7 +2819,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3001,7 +2948,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -3060,7 +3007,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3090,7 +3037,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3126,7 +3073,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3156,7 +3103,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3224,7 +3171,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -3287,7 +3234,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3418,7 +3365,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -3450,7 +3397,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -3517,7 +3464,7 @@ export interface operations {
                 purge_history?: boolean;
             };
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3547,7 +3494,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 当前 Profile 版本（来自 GET 的 ETag）；不匹配返回 409。 */
                 "If-Match": components["parameters"]["IfMatch"];
@@ -3585,7 +3532,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3622,7 +3569,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
@@ -3718,7 +3665,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3843,7 +3790,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -3873,7 +3820,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path: {
@@ -4177,7 +4124,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
@@ -4262,7 +4209,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
@@ -4367,7 +4314,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -4402,7 +4349,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
@@ -4511,7 +4458,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
@@ -4557,7 +4504,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
@@ -4625,7 +4572,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -4680,7 +4627,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -4712,7 +4659,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -4777,7 +4724,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -4832,7 +4779,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -4864,7 +4811,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -4896,7 +4843,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -4941,7 +4888,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
@@ -4994,7 +4941,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
             };
             path?: never;
@@ -5046,7 +4993,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 所有修改类请求必须携带的 CSRF token（登录/初始化时下发），并做 Origin 校验。 */
+                /** @description 所有修改类请求必须携带的 CSRF token（登录时下发），并做 Origin 校验。 */
                 "X-CSRF-Token": components["parameters"]["CsrfToken"];
                 /** @description 幂等键；重复提交返回同一个 job/action，不重复执行。 */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
@@ -5183,7 +5130,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 可服务（含未初始化时的受限就绪） */
+            /** @description 可服务 */
             200: {
                 headers: {
                     [name: string]: unknown;

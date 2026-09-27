@@ -3,17 +3,9 @@ import { readFile } from 'node:fs/promises'
 import type { Download, Locator, Page, Response } from '@playwright/test'
 import type { Job, ReportSummary } from '../../src/api/types'
 
-const requiredEnv = (name: string): string => {
-  const value = process.env[name]
-  if (value === undefined || value.length === 0) {
-    throw new Error(`${name} 必须指向真实 E2E 服务的测试配置`)
-  }
-  return value
-}
-
-const setupTokenFile = requiredEnv('E2E_SETUP_TOKEN_FILE')
-const adminUsername = requiredEnv('E2E_ADMIN_USERNAME')
-const adminPassword = requiredEnv('E2E_ADMIN_PASSWORD')
+const adminUsername = 'admin'
+const adminPassword = 'admin'
+const changedPassword = process.env.E2E_CHANGED_PASSWORD ?? 'e2e-password-20260927'
 const sourceName = `e2e-source-${process.pid}`
 const profileName = `e2e-profile-${process.pid}`
 
@@ -115,40 +107,37 @@ async function waitForExport(page: Page, exportId: string): Promise<string> {
   return state
 }
 
-test.describe('真实初始化到报告 CSV 链路', () => {
-  test('初始化、重新登录、登记数据源、运行报告并导出 CSV', async ({ page }) => {
+test.describe('真实默认登录到报告 CSV 链路', () => {
+  test('默认登录、首次改密、登记数据源、运行报告并导出 CSV', async ({ page }) => {
     test.setTimeout(300_000)
-    const setupToken = (await readFile(setupTokenFile, 'utf8')).trim()
-    if (setupToken.length === 0) {
-      throw new Error(`初始化令牌文件为空: ${setupTokenFile}`)
-    }
 
     await page.goto('/')
-    await expect(page).toHaveURL(/\/setup$/)
-    await page.getByLabel('初始化令牌').fill(setupToken)
-    await page.getByLabel('管理员用户名').fill(adminUsername)
-    await page.getByLabel('管理员密码').fill(adminPassword)
-    await page.getByLabel('确认密码').fill(adminPassword)
-    await chooseOption(page, page, '时区', 'UTC')
-
-    const setupResponse = page.waitForResponse((response) => response.url().endsWith('/api/v1/setup/complete') && response.request().method() === 'POST')
-    await page.getByRole('button', { name: '完成初始化' }).click()
-    expect((await responseEnvelope<{ username: string }>(setupResponse)).data.username).toBe(adminUsername)
-    await expect(page).toHaveURL(/\/overview$/)
-    await expect(page.getByRole('heading', { name: '总览' })).toBeVisible()
-
-    const logoutResponse = page.waitForResponse((response) => response.url().endsWith('/api/v1/auth/logout') && response.request().method() === 'POST')
-    await page.getByRole('button', { name: '退出登录' }).click()
-    expect((await responseEnvelope<Record<string, never>>(logoutResponse)).data).toEqual({})
     await expect(page).toHaveURL(/\/login$/)
-
     await page.getByLabel('用户名').fill(adminUsername)
     await page.getByLabel('密码').fill(adminPassword)
     const loginResponse = page.waitForResponse((response) => response.url().endsWith('/api/v1/auth/login') && response.request().method() === 'POST')
     await page.locator('form button[type="submit"]').click()
-    const loginData = (await responseEnvelope<{ admin: { username: string }; csrf_token: string }>(loginResponse)).data
+    const loginData = (await responseEnvelope<{ admin: { username: string; must_change_password: boolean }; csrf_token: string }>(loginResponse)).data
     expect(loginData.admin.username).toBe(adminUsername)
+    expect(loginData.admin.must_change_password).toBe(true)
     expect(loginData.csrf_token).toEqual(expect.any(String))
+    await expect(page).toHaveURL(/\/change-password$/)
+
+    await page.getByLabel('新密码').fill(changedPassword)
+    await page.getByLabel('确认新密码').fill(changedPassword)
+    const changePasswordResponse = page.waitForResponse((response) => response.url().endsWith('/api/v1/auth/change-password') && response.request().method() === 'POST')
+    await page.getByRole('button', { name: '修改密码并重新登录' }).click()
+    expect((await responseEnvelope<Record<string, never>>(changePasswordResponse)).data).toEqual({})
+    await expect(page).toHaveURL(/\/login$/)
+
+    await page.getByLabel('用户名').fill(adminUsername)
+    await page.getByLabel('密码').fill(changedPassword)
+    const reloginResponse = page.waitForResponse((response) => response.url().endsWith('/api/v1/auth/login') && response.request().method() === 'POST')
+    await page.locator('form button[type="submit"]').click()
+    const reloginData = (await responseEnvelope<{ admin: { username: string; must_change_password: boolean }; csrf_token: string }>(reloginResponse)).data
+    expect(reloginData.admin.username).toBe(adminUsername)
+    expect(reloginData.admin.must_change_password).toBe(false)
+    expect(reloginData.csrf_token).toEqual(expect.any(String))
     await expect(page).toHaveURL(/\/overview$/)
 
     await page.getByRole('menuitem', { name: '数据源' }).click()

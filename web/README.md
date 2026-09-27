@@ -25,26 +25,23 @@ pnpm build                       # tsc -b && vite build -> dist/
 ## 端到端测试说明
 
 `pnpm test:e2e` 始终真实执行，不使用 mock；未设置 `E2E_BASE_URL` 时会显式失败。
-未初始化服务的完整链路由启动脚本负责准备一次性令牌和测试临时根目录：
+默认登录和首次改密链路由启动脚本负责准备测试临时根目录：
 
 ```bash
 pnpm exec playwright install chromium   # 首次需要下载浏览器
 pnpm test:e2e:real
 ```
 
-`tests/e2e/run-real-e2e.sh` 使用临时数据目录和临时批准挂载，调用现有
-`cargo run -p nas-analyzer -- admin setup-token` 与 `serve` 启动真实后端，再启动 Vite。
-它运行 `real-flow.spec.ts` 的初始化、登录、数据源登记、报告任务、任务/报告等待、
+`tests/e2e/run-real-e2e.sh` 使用临时数据目录和临时批准挂载，调用 `serve` 启动真实后端，再启动 Vite。
+它运行 `real-flow.spec.ts` 的默认登录、首次改密、数据源登记、报告任务、任务/报告等待、
 报告详情和 CSV 下载链路；失败时保留临时运行根目录、后端日志和前端日志。可通过
-`E2E_ADMIN_USERNAME`、`E2E_ADMIN_PASSWORD` 覆盖测试账号，密码未设置时由脚本随机生成，
-不会把秘密写入仓库或命令行参数。已有服务的真实链路运行需同时提供
-`E2E_SETUP_TOKEN_FILE`、`E2E_ADMIN_USERNAME`、`E2E_ADMIN_PASSWORD`，不能把缺少配置当成通过。
+`E2E_CHANGED_PASSWORD` 指定首次改密后的密码，未设置时由脚本随机生成，不会把秘密写入仓库。
 
 ## 目录结构（spec 15.4）
 
 ```text
 src/app/          providers（QueryClient/antd zhCN）、router、RequireAuth 守卫、布局
-src/features/     auth（login/setup/useMe）、overview、sources、profiles、jobs、
+src/features/     auth（login/change-password/useMe）、overview、sources、profiles、jobs、
                   reports（列表 + :id 详情）、cleanup、settings、diagnostics
 src/api/          client.ts（同源 fetch 封装）、errors.ts（ApiError）、types.ts（契约 DTO）、
                   schema.d.ts（由 api/openapi.yaml 生成）
@@ -57,12 +54,12 @@ tests/e2e/        Playwright 用例
 ## 接口契约要点（spec 15.8）
 
 - 同源 cookie 凭据；已建立会话后 mutation 自动携带 `nas_csrf` cookie 中的 CSRF 头。
-  登录和初始化由服务端下发会话与 CSRF cookie。
+  登录由服务端下发会话与 CSRF cookie。
 - 每个请求生成并发送 `X-Request-ID`；错误响应解析统一错误信封
   `{ error: { code, message, details }, request_id }` 为 `ApiError`（稳定错误码）。
 - 成功响应严格解析统一信封 `{ data, meta, request_id }`；列表 `data` 为数组，
   分页字段位于 `meta`。
-- 401 全局跳转 `/login` 并清空用户查询缓存；守卫额外把 `SETUP_REQUIRED` 导向 `/setup`。
+- 401 全局跳转 `/login` 并清空用户查询缓存；首次登录改密由 `must_change_password` 状态驱动。
 - QueryState 明确区分 401 / 403（权限/只读）/ 410（历史明细过期）/ 503（服务不可用），
   不会把错误渲染成“没有文件”。
 - mutation 不自动重试；扫描/清理等只由显式用户动作触发。
@@ -70,8 +67,7 @@ tests/e2e/        Playwright 用例
 
 ## 页面接线范围
 
-- setup 使用 `/api/v1/setup/status` 与 `/api/v1/setup/complete`；登录后的页面使用
-  OpenAPI 中定义的真实资源路径和 envelope DTO。
+- 登录和首次改密使用 OpenAPI 中定义的真实认证路径和 envelope DTO。
 - 数据源支持批准挂载选择、登记和只读探测；报告任务支持创建与手动运行；任务中心支持
   状态刷新和 pause/resume/cancel/retry 控制。
 - 报告、设置、诊断与审计、清理预览和隔离恢复均已接入对应 API。危险清理执行仍由服务端

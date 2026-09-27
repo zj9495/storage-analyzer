@@ -2,8 +2,9 @@
 # Container smoke test (M8; also runnable after any docker-build):
 # builds nothing itself — expects the image passed as $1 or the default local
 # image to exist. Verifies non-root execution, read-only root and source
-# mounts, image healthcheck, config-check, setup gating, graceful stop and
-# SQLite persistence across a container restart.
+# mounts, image healthcheck, config-check, default-login gating, graceful stop and
+# SQLite persistence across a container restart, including the default login
+# and first-password-change gate.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,9 +70,48 @@ for _ in $(seq 1 60); do
 done
 [ "$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER")" = "healthy" ]
 
-echo "== business API gated before setup"
-code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${SMOKE_PORT}/api/v1/sources")"
-[ "$code" = "401" ] || [ "$code" = "503" ]
+echo "== default login creates a restricted session"
+COOKIE_JAR="$WORK/cookies.txt"
+login_body="$WORK/login.json"
+printf '%s\n' '{"username":"admin","password":"admin"}' > "$login_body"
+login_response="$(curl -fsS \
+  -H "Origin: http://127.0.0.1:${SMOKE_PORT}" \
+  -H 'Content-Type: application/json' \
+  -c "$COOKIE_JAR" \
+  --data-binary "@$login_body" \
+  "http://127.0.0.1:${SMOKE_PORT}/api/v1/auth/login")"
+printf '%s' "$login_response" | jq -e '.data.admin.username == "admin" and .data.admin.must_change_password == true' >/dev/null
+
+echo "== business API requires the first password change"
+restricted_response="$(curl -sS \
+  -b "$COOKIE_JAR" \
+  "http://127.0.0.1:${SMOKE_PORT}/api/v1/sources")"
+printf '%s' "$restricted_response" | jq -e '.error.code == "PASSWORD_CHANGE_REQUIRED"' >/dev/null
+
+echo "== first password change revokes the bootstrap session"
+csrf_token="$(awk '$6 == "nas_csrf" { print $7 }' "$COOKIE_JAR")"
+change_body="$WORK/change-password.json"
+printf '%s\n' '{"new_password":"smoke-password"}' > "$change_body"
+curl -fsS \
+  -H "Origin: http://127.0.0.1:${SMOKE_PORT}" \
+  -H "X-CSRF-Token: $csrf_token" \
+  -H 'Content-Type: application/json' \
+  -b "$COOKIE_JAR" \
+  --data-binary "@$change_body" \
+  "http://127.0.0.1:${SMOKE_PORT}/api/v1/auth/change-password" \
+  | jq -e '.data == {}' >/dev/null
+old_session_code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "http://127.0.0.1:${SMOKE_PORT}/api/v1/auth/me")"
+[ "$old_session_code" = "401" ]
+
+echo "== changed password replaces the bootstrap password"
+printf '%s\n' '{"username":"admin","password":"smoke-password"}' > "$login_body"
+login_response="$(curl -fsS \
+  -H "Origin: http://127.0.0.1:${SMOKE_PORT}" \
+  -H 'Content-Type: application/json' \
+  -c "$COOKIE_JAR" \
+  --data-binary "@$login_body" \
+  "http://127.0.0.1:${SMOKE_PORT}/api/v1/auth/login")"
+printf '%s' "$login_response" | jq -e '.data.admin.must_change_password == false' >/dev/null
 
 echo "== SIGTERM graceful stop"
 docker stop -t 60 "$CONTAINER" >/dev/null
@@ -82,5 +122,13 @@ docker start "$CONTAINER" >/dev/null
 wait_for_live
 curl -fsS "http://127.0.0.1:${SMOKE_PORT}/health/live" >/dev/null
 test -s "$WORK/data/control.sqlite"
+echo "== changed password survives restart"
+login_response="$(curl -fsS \
+  -H "Origin: http://127.0.0.1:${SMOKE_PORT}" \
+  -H 'Content-Type: application/json' \
+  -c "$COOKIE_JAR" \
+  --data-binary "@$login_body" \
+  "http://127.0.0.1:${SMOKE_PORT}/api/v1/auth/login")"
+printf '%s' "$login_response" | jq -e '.data.admin.must_change_password == false' >/dev/null
 
 echo "SMOKE PASS: $IMAGE"

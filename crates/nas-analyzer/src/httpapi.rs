@@ -147,6 +147,9 @@ impl AppState {
         {
             let mut conn = crate::store::open_connection(&db_path, false, true)?;
             migrate::apply(&mut conn, migrate::CONTROL_MIGRATIONS)?;
+            if !auth::is_initialized(&conn)? {
+                auth::bootstrap_default_admin(&mut conn, &config.server.default_timezone_name)?;
+            }
             if let Err(error) =
                 crate::retention::process_pending_artifact_deletions(&mut conn, &reports_root)
             {
@@ -205,17 +208,15 @@ fn detect_static_dir() -> Option<PathBuf> {
 /// request-id middleware; unmatched `/api/v1/*` returns the stable JSON 404
 /// "该功能尚未实现" instead of fake success.
 pub fn build_app(state: AppState) -> Router {
-    let public = Router::new()
-        .route("/setup/status", axum::routing::get(handlers::setup_status))
-        .route(
-            "/setup/complete",
-            axum::routing::post(handlers::setup_complete),
-        )
-        .route("/auth/login", axum::routing::post(handlers::login));
+    let public = Router::new().route("/auth/login", axum::routing::post(handlers::login));
 
     let authed = Router::new()
         .route("/auth/logout", axum::routing::post(handlers::logout))
         .route("/auth/me", axum::routing::get(handlers::me))
+        .route(
+            "/auth/change-password",
+            axum::routing::post(handlers::change_password),
+        )
         .route("/auth/reauth", axum::routing::post(handlers::reauth))
         .route(
             "/admins",
@@ -544,10 +545,9 @@ mod origin_tests {
 
 // ---- session auth + CSRF extractor (spec 3.3, 14.1) ----
 
-/// Authenticated request context. Extracting it enforces, in order:
-/// SETUP_REQUIRED (503) before initialization, session presence and validity
-/// (401), and — for mutating methods — the X-CSRF-Token header matching the
-/// session's CSRF secret (403).
+/// Authenticated request context. Extracting it enforces session presence and
+/// validity (401), the first-login password change gate, and — for mutating
+/// methods — the X-CSRF-Token header matching the session's CSRF secret (403).
 #[derive(Debug, Clone)]
 pub struct Auth {
     pub session: Session,
@@ -560,12 +560,6 @@ impl FromRequestParts<AppState> for Auth {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
         let req_id = request_id_of(parts.extensions.get::<RequestId>());
-        if !state.is_initialized() {
-            return Err(err_response(
-                &req_id,
-                AppError::new(ErrorCode::SetupRequired, "系统尚未完成初始化"),
-            ));
-        }
         let Some(token) = cookie_value(&parts.headers, SESSION_COOKIE) else {
             return Err(err_response(
                 &req_id,
@@ -584,6 +578,18 @@ impl FromRequestParts<AppState> for Auth {
                 AppError::new(ErrorCode::Unauthorized, "未登录或会话已失效"),
             ));
         };
+        let user_id = session.user_id.clone();
+        let must_change_password = state
+            .writer
+            .call(move |c| auth::password_change_required(c, &user_id))
+            .await
+            .map_err(|e| err_response(&req_id, e))?;
+        if must_change_password && !password_change_route(parts.uri.path()) {
+            return Err(err_response(
+                &req_id,
+                AppError::new(ErrorCode::PasswordChangeRequired, "首次登录必须先修改密码"),
+            ));
+        }
         if is_mutating(&parts.method) {
             let presented = parts.headers.get(CSRF_HEADER).and_then(to_str);
             if presented != Some(session.csrf_secret.as_str()) {
@@ -598,6 +604,10 @@ impl FromRequestParts<AppState> for Auth {
         }
         Ok(Auth { session, token })
     }
+}
+
+fn password_change_route(path: &str) -> bool {
+    matches!(path, "/auth/me" | "/auth/change-password" | "/auth/logout")
 }
 
 fn is_mutating(method: &axum::http::Method) -> bool {

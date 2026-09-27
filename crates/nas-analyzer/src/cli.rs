@@ -173,46 +173,12 @@ fn open_migrated(dir: &Path) -> Result<rusqlite::Connection> {
     Ok(conn)
 }
 
-/// Generate a one-time setup token and write it to `<data-dir>/setup-token`
-/// (mode 0600). The token itself is never printed to stdout/logs.
-pub fn admin_setup_token(data_dir: &str) -> Result<()> {
-    let (conn, _instance_lock) = open_control_db(data_dir)?;
-    let token = auth::generate_setup_token(&conn, 30)
-        .map_err(|e| anyhow::anyhow!("cannot generate setup token: {e}"))?;
-    let path = Path::new(data_dir).join("setup-token");
-    write_token_file(&path, &token)?;
-    println!(
-        "setup token written to {} (single use, valid 30 minutes)",
-        path.display()
-    );
-    Ok(())
-}
-
-fn write_token_file(path: &Path, token: &str) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("cannot write {}", path.display()))?;
-    f.write_all(token.as_bytes())?;
-    f.write_all(b"\n")?;
-    f.sync_all()?;
-    // Force 0600 even if the file pre-existed with looser permissions.
-    let mut perms = std::fs::metadata(path)?.permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o600);
-    std::fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
 /// Reset an admin password. The new password is read from the terminal
 /// (stdin prompt), never from a CLI argument; all sessions of the user are
 /// revoked by auth::reset_password.
 pub fn admin_reset_password(data_dir: &str, username: &str) -> Result<()> {
     let (mut conn, _instance_lock) = open_control_db(data_dir)?;
-    eprint!("请输入 {username} 的新密码（至少 12 字符，输入不回显请自行注意）: ");
+    eprint!("请输入 {username} 的新密码（至少 8 字符，输入不回显请自行注意）: ");
     std::io::stderr().flush()?;
     let mut password = String::new();
     std::io::stdin()
@@ -316,7 +282,6 @@ mod tests {
             approved_mounts: vec![],
             security: SecurityConfig {
                 allow_write_operations: false,
-                setup_token_minutes: 30,
                 session_idle_minutes: 30,
                 session_absolute_hours: 24,
                 reauth_minutes: 5,

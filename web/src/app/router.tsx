@@ -4,7 +4,7 @@ import { RequireAuth } from './guards'
 import { AppLayout } from './layout'
 import { NotFoundPage } from './NotFoundPage'
 import { LoginPage } from '../features/auth/LoginPage'
-import { SetupPage } from '../features/auth/SetupPage'
+import { ChangePasswordPage } from '../features/auth/ChangePasswordPage'
 import { OverviewPage } from '../features/overview/OverviewPage'
 import { SourcesPage } from '../features/sources/SourcesPage'
 import { ProfilesPage } from '../features/profiles/ProfilesPage'
@@ -19,8 +19,15 @@ export const router = createBrowserRouter([
   {
     element: <Root />,
     children: [
-      { path: '/setup', element: <SetupPage /> },
       { path: '/login', element: <LoginPage /> },
+      {
+        path: '/change-password',
+        element: (
+          <RequireAuth>
+            <ChangePasswordPage />
+          </RequireAuth>
+        ),
+      },
       {
         path: '/',
         element: (

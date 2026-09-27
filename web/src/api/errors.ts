@@ -8,7 +8,7 @@ export interface ApiErrorInit {
 
 /**
  * 统一 API 错误。code 来自后端错误信封的稳定错误码
- * （如 FORBIDDEN / DETAIL_EXPIRED / SETUP_REQUIRED）。
+ * （如 FORBIDDEN / DETAIL_EXPIRED / PASSWORD_CHANGE_REQUIRED）。
  * 非 JSON 或不完整错误响应统一报告为 INVALID_RESPONSE。
  */
 export class ApiError extends Error {

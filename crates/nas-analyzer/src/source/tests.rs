@@ -39,7 +39,6 @@ fn test_cfg(mounts: Vec<ApprovedMount>, allow_write: bool) -> DeploymentConfig {
         approved_mounts: mounts,
         security: SecurityConfig {
             allow_write_operations: allow_write,
-            setup_token_minutes: 30,
             session_idle_minutes: 30,
             session_absolute_hours: 24,
             reauth_minutes: 5,

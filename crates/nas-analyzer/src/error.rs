@@ -23,6 +23,7 @@ pub enum ErrorCode {
     InsufficientDataSpace,
     UnsupportedCapability,
     JobStateConflict,
+    PasswordChangeRequired,
     ResourceBusy,
     ResourceBudgetExceeded,
     ValidationFailed,
@@ -55,6 +56,7 @@ impl ErrorCode {
             Self::InsufficientDataSpace => "INSUFFICIENT_DATA_SPACE",
             Self::UnsupportedCapability => "UNSUPPORTED_CAPABILITY",
             Self::JobStateConflict => "JOB_STATE_CONFLICT",
+            Self::PasswordChangeRequired => "PASSWORD_CHANGE_REQUIRED",
             Self::ResourceBusy => "RESOURCE_BUSY",
             Self::ResourceBudgetExceeded => "RESOURCE_BUDGET_EXCEEDED",
             Self::ValidationFailed => "VALIDATION_FAILED",
@@ -75,7 +77,7 @@ impl ErrorCode {
         // description documents them accordingly.
         match self {
             Self::SetupRequired => 503,
-            Self::ReadOnlyMode | Self::Forbidden => 403,
+            Self::ReadOnlyMode | Self::Forbidden | Self::PasswordChangeRequired => 403,
             Self::Unauthorized => 401,
             Self::NotFound => 404,
             Self::Conflict

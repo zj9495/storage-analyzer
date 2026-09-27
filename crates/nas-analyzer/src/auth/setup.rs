@@ -1,59 +1,14 @@
-//! One-time setup tokens and first-run initialization (spec 3.3). Only the
-//! SHA-256 digest of a token is stored; consuming and completing setup are
-//! atomic so racing browsers cannot both succeed.
+//! First-run bootstrap for the control database.
 
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{AppError, AppResult, ErrorCode};
 
-use super::admin::{AdminUser, insert_admin, validate_password, validate_username};
-use super::{generate_token, internal, now_rfc3339, rfc3339_plus_minutes, token_hash};
+use super::admin::{AdminUser, insert_default_admin};
+use super::{internal, now_rfc3339};
 
 const INITIALIZED_KEY: &str = "initialized";
 const TIMEZONE_KEY: &str = "timezone";
-
-/// Generate a setup token valid for `ttl_minutes`. Returns the plaintext
-/// token; only its digest lands in `setup_tokens`.
-pub fn generate_setup_token(conn: &Connection, ttl_minutes: i64) -> AppResult<String> {
-    let token = generate_token();
-    conn.execute(
-        "INSERT INTO setup_tokens(token_hash, expires_at, used, created_at) \
-         VALUES (?1, ?2, 0, ?3)",
-        params![
-            token_hash(&token),
-            rfc3339_plus_minutes(ttl_minutes),
-            now_rfc3339()
-        ],
-    )
-    .map_err(|e| internal(format!("保存初始化令牌失败: {e}")))?;
-    Ok(token)
-}
-
-/// Atomically consume a setup token: marks it used exactly when it exists, is
-/// unused and unexpired. Returns `Unauthorized` otherwise.
-pub fn consume_setup_token(conn: &Connection, token: &str) -> AppResult<()> {
-    consume_setup_token_in(conn, token)
-}
-
-/// The atomic consume used both standalone and inside `complete_setup`'s
-/// transaction. Takes `&Connection` so a `Transaction` (which derefs to
-/// `Connection`) can be passed.
-pub(crate) fn consume_setup_token_in(conn: &Connection, token: &str) -> AppResult<()> {
-    let affected = conn
-        .execute(
-            "UPDATE setup_tokens SET used = 1 \
-             WHERE token_hash = ?1 AND used = 0 AND expires_at > ?2",
-            params![token_hash(token), now_rfc3339()],
-        )
-        .map_err(|e| internal(format!("消费初始化令牌失败: {e}")))?;
-    if affected != 1 {
-        return Err(AppError::new(
-            ErrorCode::Unauthorized,
-            "初始化令牌无效、已使用或已过期",
-        ));
-    }
-    Ok(())
-}
 
 /// Whether first-run setup has completed (`app_settings.initialized`).
 pub fn is_initialized(conn: &Connection) -> AppResult<bool> {
@@ -68,18 +23,12 @@ pub fn is_initialized(conn: &Connection) -> AppResult<bool> {
     Ok(value.as_deref() == Some("true"))
 }
 
-/// Complete first-run setup atomically: verify the app is not initialized,
-/// consume the token, create the first admin, record timezone and mark
-/// initialized — all in one transaction.
-pub fn complete_setup(
-    conn: &mut Connection,
-    token: &str,
-    username: &str,
-    password: &str,
-    timezone: &str,
-) -> AppResult<AdminUser> {
-    validate_username(username)?;
-    validate_password(password)?;
+/// Create the fixed administrator for a brand-new data directory.
+///
+/// The default password is intentionally short and is accepted only by this
+/// bootstrap path. The account is marked so the first authenticated session
+/// can be restricted until the user chooses a normal password.
+pub fn bootstrap_default_admin(conn: &mut Connection, timezone: &str) -> AppResult<AdminUser> {
     let tz = timezone.trim();
     if tz.is_empty() || tz.len() > 64 {
         return Err(AppError::new(
@@ -99,8 +48,7 @@ pub fn complete_setup(
             "系统已完成初始化，不能重复执行",
         ));
     }
-    consume_setup_token_in(&tx, token)?;
-    let admin = insert_admin(&tx, username, password)?;
+    let admin = insert_default_admin(&tx)?;
     let now = now_rfc3339();
     tx.execute(
         "INSERT INTO app_settings(key, value_json, version, updated_at) VALUES (?1, 'true', 1, ?2) \
@@ -129,8 +77,6 @@ mod tests {
 
     use super::*;
 
-    const PW: &str = "a very long password";
-
     fn test_conn() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, CONTROL_MIGRATIONS).unwrap();
@@ -138,77 +84,40 @@ mod tests {
     }
 
     #[test]
-    fn setup_completes_exactly_once() {
+    fn bootstrap_creates_default_admin_and_marks_initialized() {
         let mut conn = test_conn();
-        let token = generate_setup_token(&conn, 30).unwrap();
-        assert!(!is_initialized(&conn).unwrap());
-        let admin = complete_setup(&mut conn, &token, "admin", PW, "Asia/Shanghai").unwrap();
+        let admin = bootstrap_default_admin(&mut conn, "Asia/Shanghai").unwrap();
         assert_eq!(admin.username, "admin");
+        assert!(admin.must_change_password);
         assert!(is_initialized(&conn).unwrap());
 
-        // A second attempt — even with a fresh, valid token — must fail.
-        let token2 = generate_setup_token(&conn, 30).unwrap();
-        let e = complete_setup(&mut conn, &token2, "admin2", PW, "UTC").unwrap_err();
-        assert_eq!(e.code, ErrorCode::Conflict);
-        // And the fresh token was not consumed by the failed attempt.
-        consume_setup_token(&conn, &token2).unwrap();
-
-        // Timezone was recorded.
-        let tz: String = conn
+        let password: String = conn
+            .query_row(
+                "SELECT password_hash FROM admin_users WHERE username = 'admin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(super::super::verify_password("admin", &password).unwrap());
+        let logged_in = super::super::verify_admin_password(&conn, "admin", "admin")
+            .unwrap()
+            .unwrap();
+        assert!(logged_in.must_change_password);
+        let timezone: String = conn
             .query_row(
                 "SELECT value_json FROM app_settings WHERE key = 'timezone'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(tz, "\"Asia/Shanghai\"");
+        assert_eq!(timezone, "\"Asia/Shanghai\"");
     }
 
     #[test]
-    fn token_reuse_rejected() {
-        let conn = test_conn();
-        let token = generate_setup_token(&conn, 30).unwrap();
-        consume_setup_token(&conn, &token).unwrap();
-        let e = consume_setup_token(&conn, &token).unwrap_err();
-        assert_eq!(e.code, ErrorCode::Unauthorized);
-    }
-
-    #[test]
-    fn expired_token_rejected() {
-        let conn = test_conn();
-        let token = generate_setup_token(&conn, -1).unwrap();
-        let e = consume_setup_token(&conn, &token).unwrap_err();
-        assert_eq!(e.code, ErrorCode::Unauthorized);
-        // Unknown tokens are rejected identically.
-        let e = consume_setup_token(&conn, "deadbeef").unwrap_err();
-        assert_eq!(e.code, ErrorCode::Unauthorized);
-    }
-
-    #[test]
-    fn complete_setup_with_bad_token_changes_nothing() {
+    fn bootstrap_cannot_run_twice() {
         let mut conn = test_conn();
-        let token = generate_setup_token(&conn, -1).unwrap();
-        let e = complete_setup(&mut conn, &token, "admin", PW, "UTC").unwrap_err();
-        assert_eq!(e.code, ErrorCode::Unauthorized);
-        assert!(!is_initialized(&conn).unwrap());
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM admin_users", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn setup_rejects_invalid_inputs_before_touching_state() {
-        let mut conn = test_conn();
-        let token = generate_setup_token(&conn, 30).unwrap();
-        let e = complete_setup(&mut conn, &token, "bad name", PW, "UTC").unwrap_err();
-        assert_eq!(e.code, ErrorCode::ValidationFailed);
-        let e = complete_setup(&mut conn, &token, "admin", "short", "UTC").unwrap_err();
-        assert_eq!(e.code, ErrorCode::ValidationFailed);
-        let e = complete_setup(&mut conn, &token, "admin", PW, "").unwrap_err();
-        assert_eq!(e.code, ErrorCode::ValidationFailed);
-        // Token still unconsumed and app uninitialized.
-        assert!(!is_initialized(&conn).unwrap());
-        consume_setup_token(&conn, &token).unwrap();
+        bootstrap_default_admin(&mut conn, "UTC").unwrap();
+        let error = bootstrap_default_admin(&mut conn, "UTC").unwrap_err();
+        assert_eq!(error.code, ErrorCode::Conflict);
     }
 }

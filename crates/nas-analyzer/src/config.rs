@@ -50,7 +50,6 @@ pub struct ApprovedMount {
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
     pub allow_write_operations: bool,
-    pub setup_token_minutes: u32,
     pub session_idle_minutes: u32,
     pub session_absolute_hours: u32,
     pub reauth_minutes: u32,
@@ -123,7 +122,6 @@ struct RawMount {
 #[serde(deny_unknown_fields)]
 struct RawSecurity {
     allow_write_operations: bool,
-    setup_token_minutes: u32,
     session_idle_minutes: u32,
     session_absolute_hours: u32,
     reauth_minutes: u32,
@@ -279,11 +277,6 @@ impl DeploymentConfig {
         }
 
         let sec = &raw.security;
-        if !(5..=120).contains(&sec.setup_token_minutes) {
-            return Err(validation_err(
-                "security.setup_token_minutes must be 5..=120",
-            ));
-        }
         if !(5..=1440).contains(&sec.session_idle_minutes) {
             return Err(validation_err(
                 "security.session_idle_minutes must be 5..=1440",
@@ -396,7 +389,6 @@ impl DeploymentConfig {
             approved_mounts: mounts,
             security: SecurityConfig {
                 allow_write_operations: sec.allow_write_operations,
-                setup_token_minutes: sec.setup_token_minutes,
                 session_idle_minutes: sec.session_idle_minutes,
                 session_absolute_hours: sec.session_absolute_hours,
                 reauth_minutes: sec.reauth_minutes,

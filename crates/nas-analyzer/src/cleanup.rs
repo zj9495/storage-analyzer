@@ -4996,7 +4996,6 @@ mod tests {
             }],
             security: SecurityConfig {
                 allow_write_operations: true,
-                setup_token_minutes: 30,
                 session_idle_minutes: 30,
                 session_absolute_hours: 24,
                 reauth_minutes: 5,

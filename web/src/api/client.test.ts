@@ -217,29 +217,26 @@ describe('api client 错误信封', () => {
     expect(result.blob.size).toBe(11)
   })
 
-  it('初始化提交同时保留 setup_token body 与显式 CSRF 头', async () => {
+  it('首次改密请求保留新密码 body 与显式 CSRF 头', async () => {
     const fetchMock = vi.fn(async () =>
-      jsonResponse(201, { data: { id: 'admin-1' }, meta: {}, request_id: 'srv-1' }),
+      jsonResponse(200, { data: {}, meta: {}, request_id: 'srv-1' }),
     )
     vi.stubGlobal('fetch', fetchMock)
     document.cookie = 'nas_csrf=cookie-token'
 
     try {
-      await api.post('/api/v1/setup/complete', {
-        setup_token: 'setup-token',
-        username: 'admin',
-        password: 'a very long password',
-        timezone: 'UTC',
-      }, { headers: { 'X-CSRF-Token': 'setup-token' } })
+      await api.post('/api/v1/auth/change-password', {
+        new_password: 'a new password',
+      }, { headers: { 'X-CSRF-Token': 'csrf-token' } })
     } finally {
       document.cookie = 'nas_csrf=; Max-Age=0'
     }
 
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     const headers = new Headers(init.headers)
-    expect(headers.get('X-CSRF-Token')).toBe('setup-token')
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-token')
     expect(headers.get('Content-Type')).toBe('application/json')
-    expect(JSON.parse(String(init.body))).toMatchObject({ setup_token: 'setup-token' })
+    expect(JSON.parse(String(init.body))).toMatchObject({ new_password: 'a new password' })
   })
 })
 
